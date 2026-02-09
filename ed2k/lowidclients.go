@@ -1,6 +1,9 @@
 package ed2k
 
+import "sync"
+
 type LowIDClients struct {
+	mu          sync.Mutex
 	min         uint32
 	max         uint32
 	count       uint32
@@ -19,7 +22,7 @@ func NewLowIDClients(allowLowIDs bool) *LowIDClients {
 	}
 }
 
-func (l *LowIDClients) nextID() (uint32, bool) {
+func (l *LowIDClients) nextIDLocked() (uint32, bool) {
 	if !l.allowLowIDs {
 		return 0, false
 	}
@@ -41,11 +44,15 @@ func (l *LowIDClients) nextID() (uint32, bool) {
 }
 
 func (l *LowIDClients) Count() uint32 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.count
 }
 
 func (l *LowIDClients) Add(client any) (uint32, bool) {
-	id, ok := l.nextID()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	id, ok := l.nextIDLocked()
 	if !ok {
 		return 0, false
 	}
@@ -55,11 +62,15 @@ func (l *LowIDClients) Add(client any) (uint32, bool) {
 }
 
 func (l *LowIDClients) Get(id uint32) (any, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	v, ok := l.clients[id]
 	return v, ok
 }
 
 func (l *LowIDClients) Remove(id uint32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if _, ok := l.clients[id]; ok {
 		delete(l.clients, id)
 		l.count--

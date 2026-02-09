@@ -1,6 +1,6 @@
 name: "(TESTING!!!) eNode"
 description: "eNode: experimental ed2k server written in node.js"
-address: "192.168.1.2"
+address: ""
 dynIp: ""
 
 messageLowID: "You have LowID."
@@ -19,6 +19,7 @@ tcp:
   portObfuscated: 5565
   maxConnections: 1000000
   connectionTimeout: 2000
+  disconnectTimeout: 3600
   allowLowIDs: true
   minLowID: 1
   maxLowID: 16777215
@@ -36,7 +37,7 @@ natTraversal:
   registrationTTLSeconds: 600
 
 storage:
-  engine: mysql
+  engine: memory
   mysql:
     database: enode
     host: localhost

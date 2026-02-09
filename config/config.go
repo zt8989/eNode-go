@@ -17,6 +17,7 @@ type Config struct {
 	MessageLowID string `yaml:"messageLowID"`
 	MessageLogin string `yaml:"messageLogin"`
 	NoAssert     bool   `yaml:"noAssert"`
+	LogLevel     string `yaml:"logLevel"`
 
 	SupportCrypt bool `yaml:"supportCrypt"`
 	RequestCrypt bool `yaml:"requestCrypt"`
@@ -36,6 +37,7 @@ type TCPConfig struct {
 	PortObfuscated    uint16 `yaml:"portObfuscated"`
 	MaxConnections    int    `yaml:"maxConnections"`
 	ConnectionTimeout int    `yaml:"connectionTimeout"`
+	DisconnectTimeout int    `yaml:"disconnectTimeout"`
 	AllowLowIDs       bool   `yaml:"allowLowIDs"`
 	MinLowID          uint32 `yaml:"minLowID"`
 	MaxLowID          uint32 `yaml:"maxLowID"`
@@ -95,11 +97,17 @@ func setDefaults(cfg *Config) {
 	if cfg.Address == "" {
 		cfg.Address = "0.0.0.0"
 	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
 	if cfg.TCP.Port == 0 {
 		cfg.TCP.Port = 4661
 	}
 	if cfg.TCP.PortObfuscated == 0 {
 		cfg.TCP.PortObfuscated = 4662
+	}
+	if cfg.TCP.DisconnectTimeout <= 0 {
+		cfg.TCP.DisconnectTimeout = 3600
 	}
 	if cfg.UDP.Port == 0 {
 		cfg.UDP.Port = 4665

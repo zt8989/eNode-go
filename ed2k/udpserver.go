@@ -3,6 +3,8 @@ package ed2k
 import (
 	"net"
 	"strconv"
+
+	"enode/logging"
 )
 
 type UDPServerConfig struct {
@@ -44,6 +46,7 @@ func RunUDPServer(cfg UDPServerConfig, handler func([]byte, *net.UDPAddr, *net.U
 				return
 			}
 			data := append([]byte(nil), buf[:n]...)
+			logging.Debugf("udp recv remote=%s local=%s len=%d", remote, conn.LocalAddr(), n)
 			go handler(data, remote, conn)
 		}
 	}()

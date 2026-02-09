@@ -150,6 +150,24 @@ func (m *MemoryEngine) FindByNameContains(term string) []File {
 	return out
 }
 
+func (m *MemoryEngine) FindBySearch(expr *SearchExpr) []File {
+	if expr == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]File, 0, 32)
+	for _, f := range m.files {
+		if MatchSearchExpr(expr, f) {
+			out = append(out, f)
+			if len(out) >= 255 {
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (m *MemoryEngine) ServersCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

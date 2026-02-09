@@ -2,12 +2,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
-	"net"
 	"time"
 
 	"enode/config"
 	"enode/ed2k"
+	"enode/logging"
 	"enode/storage"
 )
 
@@ -19,17 +20,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("config load failed: %v", err)
 	}
+	if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
+		log.Fatalf("config logLevel invalid: %v", err)
+	}
+	logging.Infof("welcome: enode starting (config=%s)", *configPath)
 
 	engine, err := storage.NewEngine(cfg.StorageEngineConfig())
 	if err != nil {
-		log.Fatalf("storage engine create failed: %v", err)
+		logging.Fatalf("storage engine create failed: %v", err)
 	}
 	if err := engine.Init(); err != nil {
-		log.Fatalf("storage init failed: %v", err)
+		logging.Fatalf("storage init failed: %v", err)
 	}
 	defer func() {
 		if err := engine.Close(); err != nil {
-			log.Printf("storage close error: %v", err)
+			logging.Warnf("storage close error: %v", err)
 		}
 	}()
 
@@ -50,18 +55,51 @@ func main() {
 		GetFiles:     cfg.UDP.GetFiles,
 		SupportCrypt: cfg.SupportCrypt,
 	}
+	tcpFlags := ed2k.BuildTCPFlags(tcpCfg)
+	udpFlags := ed2k.BuildUDPFlags(udpCfg)
+	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", cfg.Address, cfg.TCP.Port)))
 
-	ln, err := ed2k.RunTCPServer(tcpCfg, func(_ net.Conn) {})
+	runtime := ed2k.NewServerRuntime(
+		ed2k.TCPRuntimeConfig{
+			Name:              cfg.Name,
+			Description:       cfg.Description,
+			Address:           cfg.Address,
+			Port:              cfg.TCP.Port,
+			Flags:             tcpFlags,
+			Hash:              serverHash,
+			MessageLogin:      cfg.MessageLogin,
+			MessageLowID:      cfg.MessageLowID,
+			ConnectionTimeout: time.Duration(cfg.TCP.ConnectionTimeout) * time.Millisecond,
+			DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
+			AllowLowIDs:       cfg.TCP.AllowLowIDs,
+			SupportCrypt:      cfg.SupportCrypt,
+		},
+		ed2k.UDPRuntimeConfig{
+			Name:           cfg.Name,
+			Description:    cfg.Description,
+			DynIP:          cfg.DynIP,
+			UDPFlags:       udpFlags,
+			UDPPortObf:     cfg.UDP.PortObfuscated,
+			TCPPortObf:     cfg.TCP.PortObfuscated,
+			UDPServerKey:   cfg.UDP.ServerKey,
+			MaxConnections: uint32(cfg.TCP.MaxConnections),
+		},
+		engine,
+	)
+
+	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(false))
 	if err != nil {
-		log.Fatalf("tcp server failed: %v", err)
+		logging.Fatalf("tcp server failed: %v", err)
 	}
 	defer ln.Close()
+	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
 
-	udpConn, err := ed2k.RunUDPServer(udpCfg, func([]byte, *net.UDPAddr, *net.UDPConn) {})
+	udpConn, err := ed2k.RunUDPServer(udpCfg, runtime.UDPHandler(false))
 	if err != nil {
-		log.Fatalf("udp server failed: %v", err)
+		logging.Fatalf("udp server failed: %v", err)
 	}
 	defer udpConn.Close()
+	logging.Infof("listening: udp %s:%d", udpCfg.Address, udpCfg.Port)
 
 	if cfg.NAT.Enabled {
 		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
@@ -74,9 +112,10 @@ func main() {
 			Port:    cfg.NAT.Port,
 		}, natHandler.HandlePacket)
 		if err != nil {
-			log.Fatalf("nat traversal udp server failed: %v", err)
+			logging.Fatalf("nat traversal udp server failed: %v", err)
 		}
 		defer natConn.Close()
+		logging.Infof("listening: nat-udp %s:%d", cfg.Address, cfg.NAT.Port)
 	}
 
 	if cfg.SupportCrypt {
@@ -85,17 +124,19 @@ func main() {
 		udpCryptCfg := udpCfg
 		udpCryptCfg.Port = cfg.UDP.PortObfuscated
 
-		lnCrypt, err := ed2k.RunTCPServer(tcpCryptCfg, func(_ net.Conn) {})
+		lnCrypt, err := ed2k.RunTCPServer(tcpCryptCfg, runtime.TCPHandler(true))
 		if err != nil {
-			log.Fatalf("obfuscated tcp server failed: %v", err)
+			logging.Fatalf("obfuscated tcp server failed: %v", err)
 		}
 		defer lnCrypt.Close()
+		logging.Infof("listening: tcp-obfuscated %s:%d", tcpCryptCfg.Address, tcpCryptCfg.Port)
 
-		udpConnCrypt, err := ed2k.RunUDPServer(udpCryptCfg, func([]byte, *net.UDPAddr, *net.UDPConn) {})
+		udpConnCrypt, err := ed2k.RunUDPServer(udpCryptCfg, runtime.UDPHandler(true))
 		if err != nil {
-			log.Fatalf("obfuscated udp server failed: %v", err)
+			logging.Fatalf("obfuscated udp server failed: %v", err)
 		}
 		defer udpConnCrypt.Close()
+		logging.Infof("listening: udp-obfuscated %s:%d", udpCryptCfg.Address, udpCryptCfg.Port)
 	}
 
 	select {}

@@ -281,6 +281,41 @@ func (m *MySQLEngine) FindByNameContains(term string) []File {
 	return out
 }
 
+func (m *MySQLEngine) FindBySearch(expr *SearchExpr) []File {
+	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	where, args := BuildSearchWhere(expr)
+	if where == "" {
+		return nil
+	}
+	rows, err := m.db.Query(
+		`SELECT s.name, f.completed, f.sources, f.hash, f.size, f.source_id, f.source_port,
+		        s.type, s.title, s.artist, s.album, s.length, s.bitrate, s.codec
+		 FROM sources s
+		 INNER JOIN files f ON s.id_file = f.id
+		 WHERE `+where+`
+		 GROUP BY s.id_file
+		 LIMIT 255`,
+		args...,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		var f File
+		var typ string
+		if err := rows.Scan(&f.Name, &f.Completed, &f.Sources, &f.Hash, &f.Size, &f.SourceID, &f.SourcePort,
+			&typ, &f.Title, &f.Artist, &f.Album, &f.Runtime, &f.Bitrate, &f.Codec); err == nil {
+			f.Type = typ
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func (m *MySQLEngine) ServersCount() int {
 	return len(m.servers)
 }
