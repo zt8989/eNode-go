@@ -2,6 +2,10 @@
 
 Go port of the original `eNode` eD2K/eMule server codebase.
 
+[中文说明](README.zh-CN.md)
+
+Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-client-communication.md)
+
 ## Included
 
 - Core eD2K protocol modules (`ed2k/*`)
@@ -13,6 +17,17 @@ Go port of the original `eNode` eD2K/eMule server codebase.
   - `mongodb` (real official MongoDB Go driver)
 - Unit tests for core modules
 - Dockertest integration tests for real MySQL/Mongo backends
+
+## Features
+
+- TCP/UDP opcodes
+- TCP/UDP protocol obfuscation
+- Obfuscated lowID detection
+- Lugdunum/eMule extended protocol
+- gzip compression
+- LowID callbacks
+- Files larger than 4 GiB
+- Easy support for multiple storage engines
 
 ## Configuration
 
@@ -72,6 +87,19 @@ ENODE_INTEGRATION=1 go test ./storage -run Dockertest -v
 ```
 
 This spins temporary MySQL and MongoDB containers, initializes schema/data, and verifies backend behavior end-to-end.
+
+## To Do
+
+- gzip compression on send
+- `OP_FOUNDSOURCES_OBFU`
+- Send `OP_SERVERSTATUS` every 5 minutes to connected clients
+- Better storage/indexing
+- IPv6 support ([unofficial draft for eD2K IPv6 extension](http://piratenpad.de/p/ed2kIPv6))
+- Support for [NAT traversal](http://en.wikipedia.org/wiki/NAT_traversal)
+
+## Thanks To
+
+- David Xanatos
 
 ## Notes
 
