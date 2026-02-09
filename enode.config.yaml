@@ -1,0 +1,47 @@
+name: "(TESTING!!!) eNode"
+description: "eNode: experimental ed2k server written in node.js"
+address: "192.168.1.2"
+dynIp: ""
+
+messageLowID: "You have LowID."
+messageLogin: "Welcome to eNode!"
+
+noAssert: false
+
+supportCrypt: true
+requestCrypt: true
+requireCrypt: true
+auxiliarPort: false
+IPinLogin: false
+
+tcp:
+  port: 5555
+  portObfuscated: 5565
+  maxConnections: 1000000
+  connectionTimeout: 2000
+  allowLowIDs: true
+  minLowID: 1
+  maxLowID: 16777215
+
+udp:
+  port: 5559
+  portObfuscated: 5569
+  getSources: true
+  getFiles: true
+  serverKey: 305419896
+
+storage:
+  engine: mysql
+  mysql:
+    database: enode
+    host: localhost
+    port: 3306
+    user: enode
+    pass: password
+    connections: 8
+    deadlockDelay: 100
+  mongodb:
+    host: 127.0.0.1
+    port: 27017
+    database: enode
+    uri: ""
