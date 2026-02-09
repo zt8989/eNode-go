@@ -67,71 +67,50 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 
 ### Encoding Conventions
 
-- Unless explicitly noted, integer fields are little-endian.
-- `hash16`: fixed 16-byte client/file hash.
-- `string`: `uint16 length + bytes`.
-- `tags`: `uint32 count`, then repeated tag entries (see `ed2k/buffer.go`).
-- `source entry`: `clientID(uint32) + clientPort(uint16)`.
+| Item | Format |
+|---|---|
+| Integer endian | Little-endian unless explicitly noted |
+| `hash16` | Fixed 16-byte client/file hash |
+| `string` | `uint16 length + bytes` |
+| `tags` | `uint32 count`, then repeated tag entries (see `ed2k/buffer.go`) |
+| `source entry` | `clientID(uint32) + clientPort(uint16)` |
 
 ### TCP Payloads (Implemented Here)
 
-- `OP_LOGINREQUEST` (client -> server, parsed):
-  - `hash16 + clientID(uint32) + clientPort(uint16) + tags`
-- `OP_SERVERMESSAGE`:
-  - `message(string)`
-- `OP_SERVERSTATUS`:
-  - `clients(uint32) + files(uint32)`
-- `OP_IDCHANGE`:
-  - `clientID(uint32) + tcpFlags(uint32)`
-- `OP_SERVERLIST`:
-  - `serverCount(uint8) + repeated(serverIP(uint32) + serverPort(uint16))`
-- `OP_SERVERIDENT`:
-  - `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags`
-- `OP_FOUNDSOURCES`:
-  - `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)`
-- `OP_SEARCHRESULT`:
-  - `resultCount(uint32) + repeated(fileRecord)`
-  - `fileRecord`: `fileHash(hash16) + sourceID(uint32) + sourcePort(uint16) + tags`
-- `OP_CALLBACKREQUESTED`:
-  - `targetIP(uint32) + targetPort(uint16)`
-- `OP_CALLBACKFAILED`:
-  - empty payload
+| OP | Direction | Payload Format |
+|---|---|---|
+| `OP_LOGINREQUEST` | Client -> Server (parsed) | `hash16 + clientID(uint32) + clientPort(uint16) + tags` |
+| `OP_SERVERMESSAGE` | Server -> Client | `message(string)` |
+| `OP_SERVERSTATUS` | Server -> Client | `clients(uint32) + files(uint32)` |
+| `OP_IDCHANGE` | Server -> Client | `clientID(uint32) + tcpFlags(uint32)` |
+| `OP_SERVERLIST` | Server -> Client | `serverCount(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` |
+| `OP_SERVERIDENT` | Server -> Client | `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags` |
+| `OP_FOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
+| `OP_SEARCHRESULT` | Server -> Client | `resultCount(uint32) + repeated(fileRecord)`; `fileRecord = fileHash(hash16) + sourceID(uint32) + sourcePort(uint16) + tags` |
+| `OP_CALLBACKREQUESTED` | Server -> LowID Client | `targetIP(uint32) + targetPort(uint16)` |
+| `OP_CALLBACKFAILED` | Server -> Client | Empty payload |
 
 ### UDP Payloads (Implemented Here)
 
-- `OP_GLOBFOUNDSOURCES`:
-  - `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)`
-- `OP_GLOBSEARCHRES`:
-  - one file per UDP packet:
-  - `fileRecord` (`fileHash + sourceID + sourcePort + tags`)
-- `OP_GLOBSERVSTATRES`:
-  - `challenge(uint32)`
-  - `users(uint32) + files(uint32)`
-  - `maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32)`
-  - `udpFlags(uint32) + lowIDUsers(uint32)`
-  - `udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32)`
-- `OP_SERVERDESCRES` (old form):
-  - `name(string) + description(string)`
-- `OP_SERVERDESCRES` (extended form):
-  - `challenge(uint32) + tags`
+| OP | Direction | Payload Format |
+|---|---|---|
+| `OP_GLOBFOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
+| `OP_GLOBSEARCHRES` | Server -> Client | One file per UDP packet: `fileRecord = fileHash + sourceID + sourcePort + tags` |
+| `OP_GLOBSERVSTATRES` | Server -> Client | `challenge(uint32) + users(uint32) + files(uint32) + maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32) + udpFlags(uint32) + lowIDUsers(uint32) + udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32)` |
+| `OP_SERVERDESCRES` (old) | Server -> Client | `name(string) + description(string)` |
+| `OP_SERVERDESCRES` (extended) | Server -> Client | `challenge(uint32) + tags` |
 
 ### NAT Payloads (`PR_NAT`)
 
-- NAT packet envelope is different from regular UDP:
-  - `protocol(1) + size(4, little-endian) + opcode(1) + payload`
-- Field endianness:
-  - NAT envelope `size`: little-endian
-  - `peerIP/peerPort` and register ACK endpoint fields: big-endian
-- `OP_NAT_REGISTER` (client -> server):
-  - `userHash(hash16)` or `userHash(hash16) + stats(3 * uint16)`
-- `OP_NAT_REGISTER` (server -> client):
-  - `serverPort(uint16, BE) + serverIP(uint32, BE)`
-- `OP_NAT_SYNC2`:
-  - `srcHash(hash16) + connAck(uint32) + dstHash(hash16)`
-- `OP_NAT_SYNC`:
-  - `peerIP(uint32, BE) + peerPort(uint16, BE) + peerHash(hash16) + connAck(uint32)`
-- `OP_NAT_FAILED`:
-  - `reason(uint8) + targetHash(hash16)` (implemented reason: `0x01`)
+| Item | Format / Note |
+|---|---|
+| NAT envelope | `protocol(1) + size(4, little-endian) + opcode(1) + payload` |
+| NAT endian note | Envelope `size` is little-endian; `peerIP/peerPort` and register ACK endpoint fields are big-endian |
+| `OP_NAT_REGISTER` (client -> server) | `userHash(hash16)` or `userHash(hash16) + stats(3 * uint16)` |
+| `OP_NAT_REGISTER` (server -> client) | `serverPort(uint16, BE) + serverIP(uint32, BE)` |
+| `OP_NAT_SYNC2` | `srcHash(hash16) + connAck(uint32) + dstHash(hash16)` |
+| `OP_NAT_SYNC` | `peerIP(uint32, BE) + peerPort(uint16, BE) + peerHash(hash16) + connAck(uint32)` |
+| `OP_NAT_FAILED` | `reason(uint8) + targetHash(hash16)` (implemented reason: `0x01`) |
 
 ## Notes
 
