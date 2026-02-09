@@ -96,12 +96,10 @@ This spins temporary MySQL and MongoDB containers, initializes schema/data, and 
 
 ## To Do
 
-- gzip compression on send
 - `OP_FOUNDSOURCES_OBFU`
 - Send `OP_SERVERSTATUS` every 5 minutes to connected clients
 - Better storage/indexing
 - IPv6 support ([unofficial draft for eD2K IPv6 extension](http://piratenpad.de/p/ed2kIPv6))
-- Support for [NAT traversal](http://en.wikipedia.org/wiki/NAT_traversal)
 
 ## Thanks To
 

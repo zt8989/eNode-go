@@ -4,6 +4,8 @@ import (
 	"enode/storage"
 )
 
+const minZlibPayloadOnSend = 128
+
 type ServerConfig struct {
 	Name        string
 	Description string
@@ -57,7 +59,11 @@ func BuildFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Buffer
 			PacketItem{Type: TypeUint16, Value: src.Port},
 		)
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {
@@ -83,7 +89,11 @@ func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {
 			SourcePort: file.SourcePort,
 		})
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildServerListPacket(servers []storage.Server) (*Buffer, error) {
@@ -101,7 +111,11 @@ func BuildServerListPacket(servers []storage.Server) (*Buffer, error) {
 			PacketItem{Type: TypeUint16, Value: s.Port},
 		)
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildServerStatusPacket(clients, files int) (*Buffer, error) {
@@ -110,7 +124,11 @@ func BuildServerStatusPacket(clients, files int) (*Buffer, error) {
 		{Type: TypeUint32, Value: uint32(clients)},
 		{Type: TypeUint32, Value: uint32(files)},
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildIDChangePacket(id uint32, tcpFlags uint32) (*Buffer, error) {
@@ -119,12 +137,20 @@ func BuildIDChangePacket(id uint32, tcpFlags uint32) (*Buffer, error) {
 		{Type: TypeUint32, Value: id},
 		{Type: TypeUint32, Value: tcpFlags},
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildCallbackFailedPacket() (*Buffer, error) {
 	pack := []PacketItem{{Type: TypeUint8, Value: OpCallbackFailed}}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
@@ -142,7 +168,11 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 			{Type: TypeString, Code: TagDescription, Data: conf.Description},
 		}},
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildServerMessagePacket(message string) (*Buffer, error) {
@@ -150,7 +180,11 @@ func BuildServerMessagePacket(message string) (*Buffer, error) {
 		{Type: TypeUint8, Value: OpServerMessage},
 		{Type: TypeString, Value: message},
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
 func BuildCallbackRequestedPacket(ipv4 uint32, port uint16) (*Buffer, error) {
@@ -159,5 +193,9 @@ func BuildCallbackRequestedPacket(ipv4 uint32, port uint16) (*Buffer, error) {
 		{Type: TypeUint32, Value: ipv4},
 		{Type: TypeUint16, Value: port},
 	}
-	return MakePacket(PrED2K, pack)
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }

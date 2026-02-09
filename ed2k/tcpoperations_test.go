@@ -69,3 +69,30 @@ func TestBuildSearchAndSources(t *testing.T) {
 		t.Fatalf("opcode mismatch")
 	}
 }
+
+func TestBuildSearchResultPacketCanCompress(t *testing.T) {
+	fileHash := []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
+	files := make([]storage.File, 0, 40)
+	for i := 0; i < 40; i++ {
+		files = append(files, storage.File{
+			Hash: fileHash, Name: "same-name-for-better-compression.bin", Size: 10, Type: "Pro",
+			Sources: 1, Completed: 1, SourceID: 11, SourcePort: 22,
+		})
+	}
+	packet, err := BuildSearchResultPacket(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.Bytes()[5] != OpSearchResult {
+		t.Fatalf("opcode mismatch")
+	}
+	if packet.Bytes()[0] == PrZlib {
+		inflated, err := InflateZlibPayload(packet.Bytes()[6:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(inflated) == 0 {
+			t.Fatalf("unexpected empty inflated payload")
+		}
+	}
+}

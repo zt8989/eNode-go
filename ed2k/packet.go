@@ -1,6 +1,11 @@
 package ed2k
 
-import "fmt"
+import (
+	"bytes"
+	"compress/zlib"
+	"fmt"
+	"io"
+)
 
 type PacketItem struct {
 	Type  uint8
@@ -157,6 +162,56 @@ func MakeUDPPacket(protocol uint8, items []PacketItem) (*Buffer, error) {
 	}
 	buf.Pos(0)
 	return buf, nil
+}
+
+// MaybeCompressTCPPacket converts a normal TCP packet into PR_ZLIB format when:
+// 1) payload length after opcode is at least minPayloadLen, and
+// 2) zlib-compressed payload is smaller than the original payload.
+func MaybeCompressTCPPacket(packet *Buffer, minPayloadLen int) (*Buffer, error) {
+	if packet == nil {
+		return nil, ErrOutOfBounds
+	}
+	raw := packet.Bytes()
+	if len(raw) < 6 {
+		return packet, nil
+	}
+	proto := raw[0]
+	if proto != PrED2K && proto != PrEMule {
+		return packet, nil
+	}
+	payload := raw[6:]
+	if len(payload) < minPayloadLen {
+		return packet, nil
+	}
+
+	var compressed bytes.Buffer
+	zw := zlib.NewWriter(&compressed)
+	if _, err := zw.Write(payload); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	if compressed.Len() >= len(payload) {
+		return packet, nil
+	}
+
+	out := NewBuffer(6 + compressed.Len())
+	_ = out.PutUInt8(PrZlib)
+	_ = out.PutUInt32LE(uint32(compressed.Len() + 1))
+	_ = out.PutUInt8(raw[5])
+	out.PutBuffer(compressed.Bytes())
+	out.Pos(0)
+	return out, nil
+}
+
+func InflateZlibPayload(payload []byte) ([]byte, error) {
+	r, err := zlib.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
 }
 
 func AddFile(packet *[]PacketItem, file SharedFile) {

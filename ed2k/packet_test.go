@@ -129,3 +129,31 @@ func TestPacketInitUnknownProtocolUsesCrypt(t *testing.T) {
 		t.Fatalf("expected crypt to be called")
 	}
 }
+
+func TestMaybeCompressTCPPacket(t *testing.T) {
+	items := []PacketItem{
+		{Type: TypeUint8, Value: OpServerMessage},
+		{Type: TypeString, Value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	}
+	p, err := MakePacket(PrED2K, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := MaybeCompressTCPPacket(p, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compressed.Bytes()[0] != PrZlib {
+		t.Fatalf("expected zlib protocol, got 0x%x", compressed.Bytes()[0])
+	}
+	if compressed.Bytes()[5] != OpServerMessage {
+		t.Fatalf("opcode mismatch")
+	}
+	inflated, err := InflateZlibPayload(compressed.Bytes()[6:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(inflated, p.Bytes()[6:]) {
+		t.Fatalf("inflated payload mismatch")
+	}
+}
