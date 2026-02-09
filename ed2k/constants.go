@@ -4,6 +4,7 @@ const (
 	PrED2K  uint8 = 0xe3
 	PrEMule uint8 = 0xc5
 	PrZlib  uint8 = 0xd4
+	PrNat   uint8 = 0xf1
 )
 
 const (
@@ -37,6 +38,18 @@ const (
 	OpGlobFoundSources uint8 = 0x9b
 	OpServerDescReq    uint8 = 0xa2
 	OpServerDescRes    uint8 = 0xa3
+)
+
+const (
+	OpNatSync     uint8 = 0xe1
+	OpNatPing     uint8 = 0xe2
+	OpNatRegister uint8 = 0xe4
+	OpNatFailed   uint8 = 0xe5
+	OpNatReping   uint8 = 0xe8
+	OpNatSync2    uint8 = 0xe9
+	OpNatData     uint8 = 0xea
+	OpNatAck      uint8 = 0xeb
+	OpNatRst      uint8 = 0xef
 )
 
 const (

@@ -26,6 +26,7 @@ type Config struct {
 
 	TCP TCPConfig `yaml:"tcp"`
 	UDP UDPConfig `yaml:"udp"`
+	NAT NATConfig `yaml:"natTraversal"`
 
 	Storage StorageConfig `yaml:"storage"`
 }
@@ -46,6 +47,12 @@ type UDPConfig struct {
 	GetSources     bool   `yaml:"getSources"`
 	GetFiles       bool   `yaml:"getFiles"`
 	ServerKey      uint32 `yaml:"serverKey"`
+}
+
+type NATConfig struct {
+	Enabled                bool   `yaml:"enabled"`
+	Port                   uint16 `yaml:"port"`
+	RegistrationTTLSeconds int    `yaml:"registrationTTLSeconds"`
 }
 
 type StorageConfig struct {
@@ -99,6 +106,12 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.UDP.PortObfuscated == 0 {
 		cfg.UDP.PortObfuscated = 4666
+	}
+	if cfg.NAT.Port == 0 {
+		cfg.NAT.Port = 2004
+	}
+	if cfg.NAT.RegistrationTTLSeconds <= 0 {
+		cfg.NAT.RegistrationTTLSeconds = 600
 	}
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"

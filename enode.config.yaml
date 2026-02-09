@@ -30,6 +30,11 @@ udp:
   getFiles: true
   serverKey: 305419896
 
+natTraversal:
+  enabled: true
+  port: 2004
+  registrationTTLSeconds: 600
+
 storage:
   engine: mysql
   mysql:

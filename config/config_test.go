@@ -35,6 +35,9 @@ storage:
 	if cfg.TCP.Port != 5555 || cfg.UDP.Port != 5559 {
 		t.Fatalf("bad ports: %+v", cfg)
 	}
+	if cfg.NAT.Port != 2004 || cfg.NAT.RegistrationTTLSeconds != 600 {
+		t.Fatalf("bad nat defaults: %+v", cfg.NAT)
+	}
 	s := cfg.StorageEngineConfig()
 	if s.Engine != "mysql" || s.MySQL.Database != "enode" {
 		t.Fatalf("bad storage config: %+v", s)

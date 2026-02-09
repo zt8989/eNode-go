@@ -8,8 +8,10 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
   - `PR_ED2K (0xe3)`: normal eD2K packets
   - `PR_ZLIB (0xd4)`: compressed payloads
   - `PR_EMULE (0xc5)`: eMule-specific protocol family
+  - `PR_NAT (0xf1)`: NAT traversal UDP protocol family
 - TCP packet format (simplified): `protocol(1) + size(4) + opcode(1) + payload`
 - UDP packet format (simplified): `protocol(1) + opcode(1) + payload`
+- NAT UDP packet format: `protocol(1) + size(4, little-endian) + opcode(1) + payload`
 
 ## TCP OP Codes
 
@@ -50,9 +52,21 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SERVERDESCRES` | `0xa3` | Server -> Client | UDP server description response. |
 | `OP_GLOBSEARCHRES` | `0x99` | Server -> Client | UDP search results response. |
 
+## NAT Traversal UDP OP Codes (`PR_NAT = 0xf1`)
+
+| OP constant | Hex | Direction | Meaning |
+|---|---:|---|---|
+| `OP_NAT_REGISTER` | `0xe4` | Client -> NAT Server | Register/refresh client hash and observed endpoint. |
+| `OP_NAT_REGISTER` | `0xe4` | NAT Server -> Client | Register ACK with server endpoint (`port(2, BE) + ip(4, BE)`). |
+| `OP_NAT_SYNC2` | `0xe9` | Client -> NAT Server | Ask server to pair source hash with target hash (`srcHash(16)+connAck(4)+dstHash(16)`). |
+| `OP_NAT_SYNC` | `0xe1` | NAT Server -> Client | Peer endpoint exchange (`peerIP(4, BE)+peerPort(2, BE)+peerHash(16)+connAck(4)`). |
+| `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered). |
+| keepalive (non-`PR_NAT`) | n/a | Client -> NAT Server | Raw UDP heartbeat without NAT header; used only to refresh last-seen. |
+
 ## Notes
 
 - Exact field encoding for each payload is implemented in:
   - `ed2k/tcpoperations.go`
   - `ed2k/udpoperations.go`
   - `ed2k/packet.go`
+  - `ed2k/nattraversal.go`

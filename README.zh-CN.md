@@ -24,6 +24,7 @@
 - Lugdunum/eMule 扩展协议
 - gzip 压缩
 - LowID 回调
+- NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）
 - 支持大于 4 GiB 的文件
 - 易于扩展多种存储引擎
 
@@ -44,6 +45,11 @@ go run ./cmd/enode -config enode.config.yaml
 ```yaml
 storage:
   engine: memory   # memory | mysql | mongodb
+
+natTraversal:
+  enabled: true
+  port: 2004
+  registrationTTLSeconds: 600
 ```
 
 MySQL 示例：

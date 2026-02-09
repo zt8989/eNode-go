@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net"
+	"time"
 
 	"enode/config"
 	"enode/ed2k"
@@ -61,6 +62,22 @@ func main() {
 		log.Fatalf("udp server failed: %v", err)
 	}
 	defer udpConn.Close()
+
+	if cfg.NAT.Enabled {
+		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
+		natHandler := ed2k.NewNATTraversalHandler(natTTL)
+		stopCleanup := natHandler.StartCleanup(time.Minute)
+		defer stopCleanup()
+
+		natConn, err := ed2k.RunUDPServer(ed2k.UDPServerConfig{
+			Address: cfg.Address,
+			Port:    cfg.NAT.Port,
+		}, natHandler.HandlePacket)
+		if err != nil {
+			log.Fatalf("nat traversal udp server failed: %v", err)
+		}
+		defer natConn.Close()
+	}
 
 	if cfg.SupportCrypt {
 		tcpCryptCfg := tcpCfg
