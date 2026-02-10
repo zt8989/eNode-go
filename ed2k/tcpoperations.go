@@ -62,14 +62,25 @@ func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []
 		{Type: TypeUint8, Value: uint8(len(sources))},
 	}
 	for _, src := range sources {
+		port := src.Port
+		if withObfuSettings && isLowID(src.ID) {
+			port = 0xFFFF
+		}
 		pack = append(pack,
 			PacketItem{Type: TypeUint32, Value: src.ID},
-			PacketItem{Type: TypeUint16, Value: src.Port},
+			PacketItem{Type: TypeUint16, Value: port},
 		)
 		if withObfuSettings {
 			// OP_FOUNDSOURCES_OBFU requires one extra "obfuscation settings" byte per source.
-			// We currently advertise no per-source obfuscation capabilities.
-			pack = append(pack, PacketItem{Type: TypeUint8, Value: uint8(0)})
+			// If user hash is present, set 0x80 and append 16-byte user hash.
+			obf := uint8(0)
+			if len(src.UserHash) == 16 {
+				obf = 0x80
+			}
+			pack = append(pack, PacketItem{Type: TypeUint8, Value: obf})
+			if obf&0x80 != 0 {
+				pack = append(pack, PacketItem{Type: TypeHash, Value: src.UserHash})
+			}
 		}
 	}
 	packet, err := MakePacket(PrED2K, pack)
@@ -77,6 +88,10 @@ func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []
 		return nil, err
 	}
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
+}
+
+func isLowID(id uint32) bool {
+	return id > 0 && id <= 0x00FFFFFF
 }
 
 func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {

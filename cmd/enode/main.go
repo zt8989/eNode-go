@@ -107,6 +107,14 @@ func main() {
 	if cfg.NAT.Enabled {
 		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
 		natHandler := ed2k.NewNATTraversalHandler(natTTL)
+		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.NAT.Port)
+		effectiveIP := cfg.DynIP
+		if effectiveIP == "" {
+			effectiveIP = cfg.Address
+		}
+		if effectiveIP == "" || effectiveIP == "0.0.0.0" {
+			logging.Warnf("nat register endpoint unresolved: dynIp=%q address=%q, clients may receive serverIP=0.0.0.0", cfg.DynIP, cfg.Address)
+		}
 		stopCleanup := natHandler.StartCleanup(time.Minute)
 		defer stopCleanup()
 

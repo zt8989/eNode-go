@@ -199,7 +199,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 		return nil
 	}
 	rows, err := m.db.Query(
-		`SELECT c.id_ed2k, c.port
+		`SELECT c.id_ed2k, c.port, c.hash
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
@@ -215,7 +215,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 	var out []Source
 	for rows.Next() {
 		var s Source
-		if err := rows.Scan(&s.ID, &s.Port); err == nil {
+		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash); err == nil {
 			out = append(out, s)
 		}
 	}
@@ -227,7 +227,7 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 		return nil
 	}
 	rows, err := m.db.Query(
-		`SELECT c.id_ed2k, c.port
+		`SELECT c.id_ed2k, c.port, c.hash
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
@@ -243,7 +243,7 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 	var out []Source
 	for rows.Next() {
 		var s Source
-		if err := rows.Scan(&s.ID, &s.Port); err == nil {
+		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash); err == nil {
 			out = append(out, s)
 		}
 	}

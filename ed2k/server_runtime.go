@@ -333,7 +333,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		logging.Warnf("login request parse failed remote=%s err=%v", c.remoteHost, err)
 		return
 	}
-	logging.Debugf("tcp payload parsed remote=%s opcode=OP_LOGINREQUEST hash=%x id=%d port=%d tags=%s",
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_LOGINREQUEST hash=%x id=%d port=%d tags=%s",
 		c.remoteHost, req.Hash, req.ID, req.Port, formatNamedTags(req.Tags, 32))
 	sessionKey := loginSessionKey(req.Hash, req.ID)
 	if sessionKey != "" {
@@ -350,7 +350,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		c.hasLowID = true
 		c.info.LowID = true
 		c.sendServerMessage(c.server.TCP.MessageLowID)
-		id, ok := c.server.LowIDs.Add(c)
+		id, ok := c.server.LowIDs.AddByEndpoint(c.info.IPv4, c.info.Port, c)
 		if !ok {
 			c.closeWithReason("lowid-pool-exhausted")
 			return
@@ -504,7 +504,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 }
 
 func (c *tcpClient) handleGetServerList() {
-	logging.Debugf("tcp payload parsed remote=%s opcode=OP_GETSERVERLIST payload=empty", c.remoteHost)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSERVERLIST payload=empty", c.remoteHost)
 	c.sendServerList()
 	c.sendServerIdent()
 }
@@ -529,10 +529,10 @@ func (c *tcpClient) handleGetSources(data *Buffer, obfuscated bool) {
 		}
 		fileSize = v
 	}
-	logging.Debugf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d",
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d",
 		c.remoteHost, opNameGetSources(obfuscated), hash, fileSize)
 	sources := c.server.Storage.GetSources(hash, fileSize)
-	logging.Debugf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
 	if len(sources) == 0 {
 		return
 	}
@@ -545,9 +545,9 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 		logging.Warnf("search request parse failed remote=%s err=%v", c.remoteHost, err)
 		return
 	}
-	logging.Debugf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
 	files := c.server.Storage.FindBySearch(expr)
-	logging.Debugf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
 	if len(files) == 0 {
 		return
 	}
@@ -560,20 +560,20 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 		logging.Warnf("callback request parse failed remote=%s err=%v", c.remoteHost, err)
 		return
 	}
-	logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d", c.remoteHost, lowID)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d", c.remoteHost, lowID)
 	v, ok := c.server.LowIDs.Get(lowID)
 	if !ok {
-		logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost, lowID)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost, lowID)
 		c.sendCallbackFailed()
 		return
 	}
 	target, ok := v.(*tcpClient)
 	if !ok {
-		logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=invalid-target-type", c.remoteHost, lowID)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=invalid-target-type", c.remoteHost, lowID)
 		c.sendCallbackFailed()
 		return
 	}
-	logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d targetIPv4=%d targetPort=%d",
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d targetIPv4=%d targetPort=%d",
 		c.remoteHost, lowID, target.info.IPv4, target.info.Port)
 	if err := target.sendCallbackRequested(c.info.IPv4, c.info.Port); err != nil {
 		c.sendCallbackFailed()
@@ -690,6 +690,13 @@ func (c *tcpClient) writeRaw(data []byte) error {
 	return err
 }
 
+func (c *tcpClient) debugPayloadf(format string, args ...any) {
+	all := make([]any, 0, len(args)+1)
+	all = append(all, c.module)
+	all = append(all, args...)
+	logging.Debugf("[module=%s] "+format, all...)
+}
+
 func (c *tcpClient) logSendPayload(raw []byte) {
 	proto, _, opcode, payload, ok := parseTCPRaw(raw)
 	if !ok {
@@ -702,7 +709,7 @@ func (c *tcpClient) logSendPayload(raw []byte) {
 				c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send protocol=PR_ZLIB opcode=%s compressedPayloadLen=%d decompressedPayloadLen=%d",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send protocol=PR_ZLIB opcode=%s compressedPayloadLen=%d decompressedPayloadLen=%d",
 			c.remoteHost, opcodeLabel(opcode), len(payload), len(inflated))
 		c.logSendPayloadByOpcode(opcode, inflated)
 		return
@@ -719,7 +726,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s message=%q", c.remoteHost, opcodeLabel(opcode), msg)
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s message=%q", c.remoteHost, opcodeLabel(opcode), msg)
 	case OpServerStatus:
 		users, err := b.GetUInt32LE()
 		if err != nil {
@@ -731,7 +738,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s users=%d files=%d", c.remoteHost, opcodeLabel(opcode), users, files)
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s users=%d files=%d", c.remoteHost, opcodeLabel(opcode), users, files)
 	case OpIDChange:
 		id, err := b.GetUInt32LE()
 		if err != nil {
@@ -743,7 +750,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s id=%d flags=%d", c.remoteHost, opcodeLabel(opcode), id, flags)
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s id=%d flags=%d", c.remoteHost, opcodeLabel(opcode), id, flags)
 	case OpServerList:
 		count, err := b.GetUInt8()
 		if err != nil {
@@ -773,7 +780,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 		if int(count) > limit {
 			entries = append(entries, fmt.Sprintf("...+%d", int(count)-limit))
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s serverCount=%d servers=[%s]",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s serverCount=%d servers=[%s]",
 			c.remoteHost, opcodeLabel(opcode), count, strings.Join(entries, ", "))
 	case OpServerIdent:
 		hash := b.Get(16)
@@ -796,7 +803,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s hash=%x ip=%d port=%d tags=%s",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s hash=%x ip=%d port=%d tags=%s",
 			c.remoteHost, opcodeLabel(opcode), hash, ipv4, port, formatNamedTags(tags, 24))
 	case OpFoundSources:
 		hash, count, entries, err := parseFoundSourcesPayload(payload, false, 20)
@@ -804,7 +811,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
 			c.remoteHost, opcodeLabel(opcode), hash, count, len(payload), entries)
 	case OpFoundSourcesObfu:
 		hash, count, entries, err := parseFoundSourcesPayload(payload, true, 20)
@@ -812,7 +819,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
 			c.remoteHost, opcodeLabel(opcode), hash, count, len(payload), entries)
 	case OpSearchResult:
 		files, err := b.GetFileList()
@@ -820,7 +827,7 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s resultCount=%d files=%s",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s resultCount=%d files=%s",
 			c.remoteHost, opcodeLabel(opcode), len(files), formatFileRecordsForLog(files, 5))
 	case OpCallbackReqd:
 		ipv4, err := b.GetUInt32LE()
@@ -833,16 +840,16 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
 			return
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s targetIP=%d targetPort=%d",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s targetIP=%d targetPort=%d",
 			c.remoteHost, opcodeLabel(opcode), ipv4, port)
 	case OpCallbackFailed:
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s payload=empty", c.remoteHost, opcodeLabel(opcode))
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s payload=empty", c.remoteHost, opcodeLabel(opcode))
 	default:
 		previewLen := len(payload)
 		if previewLen > 128 {
 			previewLen = 128
 		}
-		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s payloadLen=%d previewHex=%s",
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s payloadLen=%d previewHex=%s",
 			c.remoteHost, opcodeLabel(opcode), len(payload), hex.EncodeToString(payload[:previewLen]))
 	}
 }

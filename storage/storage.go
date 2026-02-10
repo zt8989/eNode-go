@@ -15,8 +15,9 @@ type ClientInfo struct {
 }
 
 type Source struct {
-	ID   uint32
-	Port uint16
+	ID       uint32
+	Port     uint16
+	UserHash []byte
 }
 
 type File struct {
@@ -109,10 +110,13 @@ func (m *MemoryEngine) AddFile(file File, clientInfo ClientInfo) {
 	defer m.mu.Unlock()
 	k := hashKey(file.Hash)
 	m.files[k] = file
-	src := Source{ID: clientInfo.ID, Port: clientInfo.Port}
+	src := Source{ID: clientInfo.ID, Port: clientInfo.Port, UserHash: append([]byte(nil), clientInfo.Hash...)}
 	existing := m.sources[k]
-	for _, s := range existing {
+	for i, s := range existing {
 		if s.ID == src.ID && s.Port == src.Port {
+			// Refresh hash in case client hash changed/reconnected.
+			existing[i].UserHash = append([]byte(nil), src.UserHash...)
+			m.sources[k] = existing
 			return
 		}
 	}

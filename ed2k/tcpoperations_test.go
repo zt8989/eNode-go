@@ -58,6 +58,9 @@ func TestBuildSearchAndSources(t *testing.T) {
 	if fp.Bytes()[5] != OpFoundSources {
 		t.Fatalf("opcode mismatch")
 	}
+	if fp.Bytes()[27] != 22 || fp.Bytes()[28] != 0 {
+		t.Fatalf("normal port mismatch: got=%02x%02x", fp.Bytes()[27], fp.Bytes()[28])
+	}
 	fpObfu, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{ID: 11, Port: 22}})
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +74,24 @@ func TestBuildSearchAndSources(t *testing.T) {
 	// protocol(1)+size(4)+opcode(1)+hash(16)+count(1)+id(4)+port(2) => obfu options at offset 29.
 	if fpObfu.Bytes()[29] != 0 {
 		t.Fatalf("obfu options mismatch: got=%d", fpObfu.Bytes()[29])
+	}
+	if fpObfu.Bytes()[27] != 0xff || fpObfu.Bytes()[28] != 0xff {
+		t.Fatalf("obfu lowid port mismatch: got=%02x%02x", fpObfu.Bytes()[27], fpObfu.Bytes()[28])
+	}
+	fpObfuHash, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
+		ID: 11, Port: 22, UserHash: []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fpObfuHash.Bytes()) != len(fpObfu.Bytes())+16 {
+		t.Fatalf("obfu-hash packet size mismatch: nohash=%d hash=%d", len(fpObfu.Bytes()), len(fpObfuHash.Bytes()))
+	}
+	if fpObfuHash.Bytes()[29] != 0x80 {
+		t.Fatalf("obfu-hash options mismatch: got=%d", fpObfuHash.Bytes()[29])
+	}
+	if got := fpObfuHash.Bytes()[30:46]; len(got) != 16 || got[0] != 9 || got[15] != 9 {
+		t.Fatalf("obfu-hash userhash mismatch: %x", got)
 	}
 
 	sp, err := BuildSearchResultPacket([]storage.File{{

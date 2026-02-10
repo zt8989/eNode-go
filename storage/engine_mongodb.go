@@ -290,9 +290,10 @@ func (m *MongoDBEngine) GetSourcesByHash(fileHash []byte) []Source {
 		var cdoc struct {
 			IDEd2K uint32 `bson:"id_ed2k"`
 			Port   uint16 `bson:"port"`
+			Hash   []byte `bson:"hash"`
 		}
 		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K}).Decode(&cdoc); err == nil {
-			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port})
+			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port, UserHash: append([]byte(nil), cdoc.Hash...)})
 		}
 	}
 	return out
@@ -319,9 +320,10 @@ func (m *MongoDBEngine) getSourcesByFile(ctx context.Context, fileHash []byte, f
 		var cdoc struct {
 			IDEd2K uint32 `bson:"id_ed2k"`
 			Port   uint16 `bson:"port"`
+			Hash   []byte `bson:"hash"`
 		}
 		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K}).Decode(&cdoc); err == nil {
-			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port})
+			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port, UserHash: append([]byte(nil), cdoc.Hash...)})
 		}
 	}
 	return out
