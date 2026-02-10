@@ -2,6 +2,7 @@ package ed2k
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -148,5 +149,44 @@ func TestGetFileList(t *testing.T) {
 	}
 	if f.Size != 0x100000001 {
 		t.Fatalf("size mismatch: got %d", f.Size)
+	}
+}
+
+func TestGetTagErrorContainsContext(t *testing.T) {
+	// malformed long tag: type=TypeUint32, name-len=2 (expected 1)
+	b := NewBufferFromBytes([]byte{
+		TypeUint32, 0x02, 0x00, 'x', 'y', 0x11, 0x22, 0x33, 0x44,
+	})
+	_, err := b.GetTag()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var tagErr *TagDecodeError
+	if !errors.As(err, &tagErr) {
+		t.Fatalf("expected TagDecodeError, got %T (%v)", err, err)
+	}
+	if tagErr.Stage != "name-len-ne-1" {
+		t.Fatalf("unexpected stage: %s", tagErr.Stage)
+	}
+}
+
+func TestGetTagShortFormatUint16(t *testing.T) {
+	// 0x88 => short format + TypeUint16, next byte is code.
+	b := NewBufferFromBytes([]byte{
+		0x88, TagPort, 0x36, 0x12,
+	})
+	tag, err := b.GetTag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.Name != "port2" {
+		t.Fatalf("name mismatch: %s", tag.Name)
+	}
+	v, ok := tag.Value.(uint16)
+	if !ok {
+		t.Fatalf("value type mismatch: %T", tag.Value)
+	}
+	if v != 0x1236 {
+		t.Fatalf("value mismatch: %d", v)
 	}
 }

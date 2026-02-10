@@ -58,6 +58,20 @@ func TestBuildSearchAndSources(t *testing.T) {
 	if fp.Bytes()[5] != OpFoundSources {
 		t.Fatalf("opcode mismatch")
 	}
+	fpObfu, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{ID: 11, Port: 22}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpObfu.Bytes()[5] != OpFoundSourcesObfu {
+		t.Fatalf("obfu opcode mismatch")
+	}
+	if len(fpObfu.Bytes()) != len(fp.Bytes())+1 {
+		t.Fatalf("obfu packet size mismatch: normal=%d obfu=%d", len(fp.Bytes()), len(fpObfu.Bytes()))
+	}
+	// protocol(1)+size(4)+opcode(1)+hash(16)+count(1)+id(4)+port(2) => obfu options at offset 29.
+	if fpObfu.Bytes()[29] != 0 {
+		t.Fatalf("obfu options mismatch: got=%d", fpObfu.Bytes()[29])
+	}
 
 	sp, err := BuildSearchResultPacket([]storage.File{{
 		Hash: fileHash, Name: "a.bin", Size: 10, Type: "Pro", Sources: 1, Completed: 1, SourceID: 11, SourcePort: 22,

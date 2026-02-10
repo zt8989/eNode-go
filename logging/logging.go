@@ -3,7 +3,9 @@ package logging
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"go.uber.org/zap"
@@ -25,6 +27,8 @@ var logger = newLogger()
 var sugar = logger.Sugar()
 var tableLogger = newTableLogger()
 var tableSugar = tableLogger.Sugar()
+var outputMu sync.Mutex
+var logFileHandle *os.File
 
 func ParseLevel(value string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
@@ -52,6 +56,33 @@ func SetLevelFromString(value string) error {
 		return err
 	}
 	SetLevel(level)
+	return nil
+}
+
+func SetOutputFile(path string) error {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+
+	if logFileHandle != nil {
+		_ = logFileHandle.Close()
+		logFileHandle = nil
+	}
+
+	if strings.TrimSpace(path) != "" {
+		dir := filepath.Dir(path)
+		if dir != "." && dir != "" {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		logFileHandle = f
+	}
+
+	rebuildLoggers()
 	return nil
 }
 
@@ -94,6 +125,10 @@ func Fatalf(format string, args ...any) {
 }
 
 func newLogger() *zap.Logger {
+	return newLoggerWithSyncer(currentSyncer())
+}
+
+func newLoggerWithSyncer(ws zapcore.WriteSyncer) *zap.Logger {
 	encoderCfg := zapcore.EncoderConfig{
 		TimeKey:        "time",
 		LevelKey:       "level",
@@ -102,16 +137,35 @@ func newLogger() *zap.Logger {
 		EncodeLevel:    zapcore.CapitalLevelEncoder,
 		EncodeDuration: zapcore.StringDurationEncoder,
 	}
-	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encoderCfg), zapcore.AddSync(os.Stdout), atomicLevel)
+	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encoderCfg), ws, atomicLevel)
 	return zap.New(core)
 }
 
 func newTableLogger() *zap.Logger {
+	return newTableLoggerWithSyncer(currentSyncer())
+}
+
+func newTableLoggerWithSyncer(ws zapcore.WriteSyncer) *zap.Logger {
 	encoderCfg := zapcore.EncoderConfig{
 		MessageKey: "msg",
 	}
-	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encoderCfg), zapcore.AddSync(os.Stdout), atomicLevel)
+	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encoderCfg), ws, atomicLevel)
 	return zap.New(core)
+}
+
+func currentSyncer() zapcore.WriteSyncer {
+	stdout := zapcore.AddSync(os.Stdout)
+	if logFileHandle == nil {
+		return stdout
+	}
+	return zapcore.NewMultiWriteSyncer(stdout, zapcore.AddSync(logFileHandle))
+}
+
+func rebuildLoggers() {
+	logger = newLoggerWithSyncer(currentSyncer())
+	sugar = logger.Sugar()
+	tableLogger = newTableLoggerWithSyncer(currentSyncer())
+	tableSugar = tableLogger.Sugar()
 }
 
 func toZapLevel(level Level) zapcore.Level {

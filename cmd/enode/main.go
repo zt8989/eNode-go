@@ -20,6 +20,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("config load failed: %v", err)
 	}
+	if err := logging.SetOutputFile(cfg.LogFile); err != nil {
+		log.Fatalf("config logFile invalid: %v", err)
+	}
 	if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
 		log.Fatalf("config logLevel invalid: %v", err)
 	}

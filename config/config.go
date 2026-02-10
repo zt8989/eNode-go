@@ -18,6 +18,7 @@ type Config struct {
 	MessageLogin string `yaml:"messageLogin"`
 	NoAssert     bool   `yaml:"noAssert"`
 	LogLevel     string `yaml:"logLevel"`
+	LogFile      string `yaml:"logFile"`
 
 	SupportCrypt bool `yaml:"supportCrypt"`
 	RequestCrypt bool `yaml:"requestCrypt"`
@@ -99,6 +100,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
+	}
+	if cfg.LogFile == "" {
+		cfg.LogFile = "logs/enode.log"
 	}
 	if cfg.TCP.Port == 0 {
 		cfg.TCP.Port = 4661

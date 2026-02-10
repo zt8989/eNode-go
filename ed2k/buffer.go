@@ -35,6 +35,33 @@ type FileRecord struct {
 	Size     uint64
 }
 
+type TagDecodeError struct {
+	Pos     int
+	Stage   string
+	TagType uint8
+	Code    uint8
+	Err     error
+}
+
+func (e *TagDecodeError) Error() string {
+	if e == nil {
+		return "tag decode error"
+	}
+	if e.Code != 0 {
+		return fmt.Sprintf("tag decode failed stage=%s pos=%d type=0x%x code=0x%x: %v",
+			e.Stage, e.Pos, e.TagType, e.Code, e.Err)
+	}
+	return fmt.Sprintf("tag decode failed stage=%s pos=%d type=0x%x: %v",
+		e.Stage, e.Pos, e.TagType, e.Err)
+}
+
+func (e *TagDecodeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type Buffer struct {
 	data    []byte
 	pointer int
@@ -353,18 +380,22 @@ func tagName(code uint8) string {
 }
 
 func (b *Buffer) GetTag() (NamedTag, error) {
+	startPos := b.Pos()
 	tagType, err := b.GetUInt8()
 	if err != nil {
 		return NamedTag{}, err
 	}
+	origTagType := tagType
+	shortFormat := false
 
 	var code uint8
 	var value any
 
 	if tagType&0x80 != 0 {
+		shortFormat = true
 		c, err := b.GetUInt8()
 		if err != nil {
-			return NamedTag{}, err
+			return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-short-code", TagType: origTagType, Err: err}
 		}
 		code = c
 		tagType &= 0x7f
@@ -373,30 +404,35 @@ func (b *Buffer) GetTag() (NamedTag, error) {
 			tagType = TypeString
 			s, err := b.GetString(strLen)
 			if err != nil {
-				return NamedTag{}, err
+				return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-short-string", TagType: origTagType, Code: code, Err: err}
 			}
 			value = s
 		}
 	}
 
 	if value == nil {
-		if tagType&0x80 == 0 {
+		if !shortFormat {
 			l, err := b.GetUInt16LE()
 			if err != nil {
-				return NamedTag{}, err
+				return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-name-len", TagType: origTagType, Err: err}
 			}
 			if l != 1 {
-				return NamedTag{}, ErrUnhandledTag
+				return NamedTag{}, &TagDecodeError{
+					Pos:     startPos,
+					Stage:   "name-len-ne-1",
+					TagType: origTagType,
+					Err:     fmt.Errorf("%w: name-len=%d", ErrUnhandledTag, l),
+				}
 			}
 			c, err := b.GetUInt8()
 			if err != nil {
-				return NamedTag{}, err
+				return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-name-code", TagType: origTagType, Err: err}
 			}
 			code = c
 		}
 		v, err := b.GetTagValue(tagType)
 		if err != nil {
-			return NamedTag{}, err
+			return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-value", TagType: origTagType, Code: code, Err: err}
 		}
 		value = v
 	}
@@ -405,6 +441,7 @@ func (b *Buffer) GetTag() (NamedTag, error) {
 }
 
 func (b *Buffer) GetTags() ([]NamedTag, error) {
+	startPos := b.Pos()
 	count, err := b.GetUInt32LE()
 	if err != nil {
 		return nil, err
@@ -413,7 +450,7 @@ func (b *Buffer) GetTags() ([]NamedTag, error) {
 	for i := uint32(0); i < count; i++ {
 		tag, err := b.GetTag()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("tags decode failed start=%d idx=%d: %w", startPos, i, err)
 		}
 		tags = append(tags, tag)
 	}
@@ -441,7 +478,7 @@ func (b *Buffer) GetFileList() ([]FileRecord, error) {
 		}
 		tags, err := b.GetTags()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("filelist decode failed file-idx=%d hash=%x id=%d port=%d: %w", i, hash, id, port, err)
 		}
 		record := FileRecord{
 			Hash:     hash,

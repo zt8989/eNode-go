@@ -62,6 +62,10 @@ func (t *TCPCrypt) CryptStatus() int {
 func (t *TCPCrypt) negotiate() ([]byte, error) {
 	g := big.NewInt(2)
 	p := new(big.Int).SetBytes(CryptPrime)
+	// Obfuscated incoming stream starts with 1-byte non-protocol marker.
+	if _, err := t.Packet.Data.GetUInt8(); err != nil {
+		return nil, err
+	}
 	aBytes := t.Packet.Data.Get(CryptPrimeSize)
 	if len(aBytes) != CryptPrimeSize {
 		return nil, ErrOutOfBounds

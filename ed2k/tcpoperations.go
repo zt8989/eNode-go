@@ -48,8 +48,16 @@ func ParseLoginRequest(data *Buffer) (LoginRequest, error) {
 }
 
 func BuildFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
+	return buildFoundSourcesPacketWithOpcode(OpFoundSources, fileHash, sources, false)
+}
+
+func BuildFoundSourcesObfuPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
+	return buildFoundSourcesPacketWithOpcode(OpFoundSourcesObfu, fileHash, sources, true)
+}
+
+func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []storage.Source, withObfuSettings bool) (*Buffer, error) {
 	pack := []PacketItem{
-		{Type: TypeUint8, Value: OpFoundSources},
+		{Type: TypeUint8, Value: opcode},
 		{Type: TypeHash, Value: fileHash},
 		{Type: TypeUint8, Value: uint8(len(sources))},
 	}
@@ -58,6 +66,11 @@ func BuildFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Buffer
 			PacketItem{Type: TypeUint32, Value: src.ID},
 			PacketItem{Type: TypeUint16, Value: src.Port},
 		)
+		if withObfuSettings {
+			// OP_FOUNDSOURCES_OBFU requires one extra "obfuscation settings" byte per source.
+			// We currently advertise no per-source obfuscation capabilities.
+			pack = append(pack, PacketItem{Type: TypeUint8, Value: uint8(0)})
+		}
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {

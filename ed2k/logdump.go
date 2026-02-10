@@ -3,37 +3,45 @@ package ed2k
 import (
 	"encoding/binary"
 	"fmt"
-	"strings"
+	"strconv"
 
 	"enode/logging"
-
-	"github.com/jedib0t/go-pretty/v6/table"
 )
 
-func LogTCPPacket(dir string, remote string, protocol uint8, opcode uint8, payload []byte) {
+func LogTCPPacket(module string, dir string, remote string, protocol uint8, opcode uint8, payload []byte) {
 	size := uint32(len(payload) + 1)
-	logging.DebugTablef(formatLogLine("tcp", dir, remote, protocolName(protocol), opcodeName(opcode, dir),
+	logging.Debugf(formatLogLine(module, "tcp", dir, remote, protocolName(protocol), opcodeName(opcode, dir),
 		fmt.Sprintf("%d", size), fmt.Sprintf("%d", len(payload))))
 }
 
-func LogTCPRaw(dir string, remote string, raw []byte) {
+func LogTCPRaw(module string, dir string, remote string, raw []byte) {
 	proto, size, opcode, payload, ok := parseTCPRaw(raw)
 	if !ok {
-		logging.DebugTablef(formatLogLine("tcp", dir, remote, "-", "-", "-", "-"))
+		logging.Debugf(formatLogLine(module, "tcp", dir, remote, "-", "-", "-", "-"))
 		return
 	}
-	logging.DebugTablef(formatLogLine("tcp", dir, remote, protocolName(proto), opcodeName(opcode, dir),
+	logging.Debugf(formatLogLine(module, "tcp", dir, remote, protocolName(proto), opcodeName(opcode, dir),
 		fmt.Sprintf("%d", size), fmt.Sprintf("%d", len(payload))))
 }
 
-func LogUDPRaw(dir string, remote string, raw []byte) {
+func LogUDPRaw(module string, dir string, remote string, raw []byte) {
 	proto, opcode, payload, ok := parseUDPRaw(raw)
 	if !ok {
-		logging.DebugTablef(formatLogLine("udp", dir, remote, "-", "-", "-", "-"))
+		logging.Debugf(formatLogLine(module, "udp", dir, remote, "-", "-", "-", "-"))
 		return
 	}
-	logging.DebugTablef(formatLogLine("udp", dir, remote, protocolName(proto), opcodeName(opcode, dir),
+	logging.Debugf(formatLogLine(module, "udp", dir, remote, protocolName(proto), opcodeName(opcode, dir),
 		"-", fmt.Sprintf("%d", len(payload))))
+}
+
+func LogNATRaw(module string, dir string, remote string, raw []byte) {
+	proto, size, opcode, payload, ok := parseNATRaw(raw)
+	if !ok {
+		logging.Debugf(formatLogLine(module, "nat", dir, remote, "-", "-", "-", "-"))
+		return
+	}
+	logging.Debugf(formatLogLine(module, "nat", dir, remote, protocolName(proto), opcodeName(opcode, dir),
+		fmt.Sprintf("%d", size), fmt.Sprintf("%d", len(payload))))
 }
 
 func parseTCPRaw(raw []byte) (uint8, uint32, uint8, []byte, bool) {
@@ -58,6 +66,25 @@ func parseUDPRaw(raw []byte) (uint8, uint8, []byte, bool) {
 		return 0, 0, nil, false
 	}
 	return raw[0], raw[1], raw[2:], true
+}
+
+func parseNATRaw(raw []byte) (uint8, uint32, uint8, []byte, bool) {
+	if len(raw) < 6 {
+		return 0, 0, 0, nil, false
+	}
+	if raw[0] != PrNat {
+		return raw[0], 0, 0, nil, false
+	}
+	size := binary.LittleEndian.Uint32(raw[1:5])
+	if size == 0 {
+		return PrNat, size, 0, nil, false
+	}
+	if int(5+size) > len(raw) {
+		return PrNat, size, 0, nil, false
+	}
+	opcode := raw[5]
+	payload := raw[6 : 5+size]
+	return PrNat, size, opcode, payload, true
 }
 
 func protocolName(p uint8) string {
@@ -173,13 +200,30 @@ func directionLabel(dir string) string {
 	}
 }
 
-func formatLogLine(proto, dir, remote, protocol, opcode, size, payloadLen string) string {
-	var b strings.Builder
-	tw := table.NewWriter()
-	tw.SetOutputMirror(&b)
-	tw.SetStyle(table.StyleLight)
-	tw.AppendHeader(table.Row{"Proto", "Dir", "Flow", "Remote", "Protocol", "Opcode", "Size", "PayloadLen"})
-	tw.AppendRow(table.Row{proto, dir, directionLabel(dir), remote, protocol, opcode, size, payloadLen})
-	tw.Render()
-	return strings.TrimRight(b.String(), "\n")
+func formatLogLine(module, proto, dir, remote, protocol, opcode, size, payloadLen string) string {
+	flow := directionLabel(dir)
+	return fmt.Sprintf(
+		"module=%s proto=%s dir=%s flow=%s remote=%s protocol=%s opcode=%s size=%s payloadLen=%s",
+		formatKV(module),
+		formatKV(proto),
+		formatKV(dir),
+		formatKV(flow),
+		formatKV(remote),
+		formatKV(protocol),
+		formatKV(opcode),
+		formatKV(size),
+		formatKV(payloadLen),
+	)
+}
+
+func formatKV(v string) string {
+	if v == "" {
+		return `""`
+	}
+	for _, ch := range v {
+		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '"' {
+			return strconv.Quote(v)
+		}
+	}
+	return v
 }

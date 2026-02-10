@@ -2,10 +2,13 @@ package ed2k
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"enode/logging"
@@ -13,18 +16,19 @@ import (
 )
 
 type TCPRuntimeConfig struct {
-	Name              string
-	Description       string
-	Address           string
-	Port              uint16
-	Flags             uint32
-	Hash              []byte
-	MessageLogin      string
-	MessageLowID      string
-	ConnectionTimeout time.Duration
-	DisconnectTimeout time.Duration
-	AllowLowIDs       bool
-	SupportCrypt      bool
+	Name                 string
+	Description          string
+	Address              string
+	Port                 uint16
+	Flags                uint32
+	Hash                 []byte
+	MessageLogin         string
+	MessageLowID         string
+	ConnectionTimeout    time.Duration
+	DisconnectTimeout    time.Duration
+	ServerStatusInterval time.Duration
+	AllowLowIDs          bool
+	SupportCrypt         bool
 }
 
 type UDPRuntimeConfig struct {
@@ -43,14 +47,21 @@ type ServerRuntime struct {
 	UDP     UDPRuntimeConfig
 	Storage storage.Engine
 	LowIDs  *LowIDClients
+
+	sessionsMu sync.Mutex
+	sessions   map[string]*tcpClient
 }
 
 func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.Engine) *ServerRuntime {
+	if tcp.ServerStatusInterval <= 0 {
+		tcp.ServerStatusInterval = defaultServerStatusInterval
+	}
 	return &ServerRuntime{
-		TCP:     tcp,
-		UDP:     udp,
-		Storage: store,
-		LowIDs:  NewLowIDClients(tcp.AllowLowIDs),
+		TCP:      tcp,
+		UDP:      udp,
+		Storage:  store,
+		LowIDs:   NewLowIDClients(tcp.AllowLowIDs),
+		sessions: map[string]*tcpClient{},
 	}
 }
 
@@ -63,6 +74,10 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 
 func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, *net.UDPConn) {
 	crypt := NewUDPCrypt(enableCrypt, s.UDP.UDPServerKey)
+	module := "udp"
+	if enableCrypt {
+		module = "udp-obfs"
+	}
 	return func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
 		if len(data) == 0 {
 			return
@@ -70,7 +85,7 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		if crypt != nil && crypt.Status == CsEncrypting {
 			data = crypt.Decrypt(data)
 		}
-		LogUDPRaw("recv", remote.String(), data)
+		LogUDPRaw(module, "recv", remote.String(), data)
 		b := NewBufferFromBytes(data)
 		protocol, err := b.GetUInt8()
 		if err != nil {
@@ -86,21 +101,21 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		}
 		switch code {
 		case OpGlobGetSources:
-			s.udpGlobGetSources(b, remote, conn, crypt)
+			s.udpGlobGetSources(b, remote, conn, crypt, module)
 		case OpGlobGetSources2:
-			s.udpGlobGetSources2(b, remote, conn, crypt)
+			s.udpGlobGetSources2(b, remote, conn, crypt, module)
 		case OpGlobServStatReq:
-			s.udpGlobServStatReq(b, remote, conn, crypt)
+			s.udpGlobServStatReq(b, remote, conn, crypt, module)
 		case OpServerDescReq:
 			if len(data) < 6 {
-				s.udpServDescResOld(remote, conn, crypt)
+				s.udpServDescResOld(remote, conn, crypt, module)
 			} else {
-				s.udpServDescRes(b, remote, conn, crypt)
+				s.udpServDescRes(b, remote, conn, crypt, module)
 			}
 		case OpGlobSearchReq:
-			s.udpGlobSearchReq(b, remote, conn, crypt)
+			s.udpGlobSearchReq(b, remote, conn, crypt, module)
 		case OpGlobSearchReq3:
-			s.udpGlobSearchReq3(b, remote, conn, crypt)
+			s.udpGlobSearchReq3(b, remote, conn, crypt, module)
 		default:
 			logging.Debugf("udp unknown opcode remote=%s opcode=0x%x", remote, code)
 		}
@@ -108,14 +123,20 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 }
 
 type tcpClient struct {
-	server     *ServerRuntime
-	conn       net.Conn
-	packet     *Packet
-	crypt      *TCPCrypt
-	info       storage.ClientInfo
-	logged     bool
-	hasLowID   bool
-	remoteHost string
+	server      *ServerRuntime
+	conn        net.Conn
+	packet      *Packet
+	crypt       *TCPCrypt
+	module      string
+	writeMu     sync.Mutex
+	closeMu     sync.Mutex
+	info        storage.ClientInfo
+	logged      bool
+	hasLowID    bool
+	remoteHost  string
+	sessionKey  string
+	statusStop  chan struct{}
+	closeReason string
 }
 
 func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpClient {
@@ -132,11 +153,13 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 	if enableCrypt {
 		crypt = NewTCPCrypt(packet, true)
 	}
+	enableTCPKeepAlive(conn, defaultTCPKeepAlivePeriod)
 	return &tcpClient{
 		server:     server,
 		conn:       conn,
 		packet:     packet,
 		crypt:      crypt,
+		module:     tcpModule(enableCrypt),
 		hasLowID:   true,
 		remoteHost: host,
 		info: storage.ClientInfo{
@@ -148,8 +171,31 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 	}
 }
 
+const defaultTCPKeepAlivePeriod = 2 * time.Minute
+const defaultServerStatusInterval = 5 * time.Minute
+
+func enableTCPKeepAlive(conn net.Conn, period time.Duration) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	if err := tcp.SetKeepAlive(true); err != nil {
+		return
+	}
+	if period > 0 {
+		_ = tcp.SetKeepAlivePeriod(period)
+	}
+}
+
 func (c *tcpClient) run() {
+	c.setCloseReason("read-loop-ended")
 	defer func() {
+		if c.statusStop != nil {
+			close(c.statusStop)
+		}
+		if c.sessionKey != "" {
+			c.server.unregisterSession(c.sessionKey, c)
+		}
 		if c.hasLowID {
 			c.server.LowIDs.Remove(c.info.ID)
 		}
@@ -157,6 +203,8 @@ func (c *tcpClient) run() {
 			c.server.Storage.Disconnect(c.info)
 		}
 		_ = c.conn.Close()
+		logging.Infof("tcp session closed remote=%s id=%d lowID=%t storeID=%d reason=%s",
+			c.remoteHost, c.info.ID, c.info.LowID, c.info.StoreID, c.getCloseReason())
 	}()
 
 	buf := make([]byte, 4096)
@@ -166,9 +214,17 @@ func (c *tcpClient) run() {
 		}
 		n, err := c.conn.Read(buf)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				c.setCloseReason("peer-closed")
+			} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				c.setCloseReason(fmt.Sprintf("read-timeout(%s)", c.server.TCP.DisconnectTimeout))
+			} else {
+				c.setCloseReason(fmt.Sprintf("read-error: %v", err))
+			}
 			return
 		}
 		if n == 0 {
+			c.setCloseReason("read-zero")
 			return
 		}
 		c.handleBytes(buf[:n])
@@ -232,19 +288,19 @@ func (c *tcpClient) processPacketData(data []byte) {
 func (c *tcpClient) handlePacket(packet *Packet) {
 	switch packet.Protocol {
 	case PrED2K:
-		LogTCPPacket("recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
+		LogTCPPacket(c.module, "recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
 		c.handleED2K(packet.Code, packet.Data)
 	case PrZlib:
-		LogTCPPacket("recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
+		LogTCPPacket(c.module, "recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
 		payload, err := InflateZlibPayload(packet.Data.Bytes())
 		if err != nil {
 			logging.Warnf("tcp zlib inflate failed remote=%s err=%v", c.remoteHost, err)
 			return
 		}
-		LogTCPPacket("recv-decompressed", c.remoteHost, PrED2K, packet.Code, payload)
+		LogTCPPacket(c.module, "recv-decompressed", c.remoteHost, PrED2K, packet.Code, payload)
 		c.handleED2K(packet.Code, NewBufferFromBytes(payload))
 	default:
-		LogTCPPacket("recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
+		LogTCPPacket(c.module, "recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
 		logging.Debugf("tcp unsupported protocol remote=%s proto=0x%x", c.remoteHost, packet.Protocol)
 	}
 }
@@ -258,8 +314,10 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		c.handleOfferFiles(data)
 	case OpGetServerList:
 		c.handleGetServerList()
-	case OpGetSources, OpGetSourcesObfu:
-		c.handleGetSources(data)
+	case OpGetSources:
+		c.handleGetSources(data, false)
+	case OpGetSourcesObfu:
+		c.handleGetSources(data, true)
 	case OpSearchRequest:
 		c.handleSearchRequest(data)
 	case OpCallbackRequest:
@@ -275,24 +333,26 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		logging.Warnf("login request parse failed remote=%s err=%v", c.remoteHost, err)
 		return
 	}
+	logging.Debugf("tcp payload parsed remote=%s opcode=OP_LOGINREQUEST hash=%x id=%d port=%d tags=%s",
+		c.remoteHost, req.Hash, req.ID, req.Port, formatNamedTags(req.Tags, 32))
+	sessionKey := loginSessionKey(req.Hash, req.ID)
+	if sessionKey != "" {
+		c.sessionKey = sessionKey
+		c.server.replaceSession(sessionKey, c)
+	}
 	c.info.Hash = req.Hash
 	c.info.ID = req.ID
 	c.info.Port = req.Port
 
-	if c.server.Storage.IsConnected(c.info) {
-		logging.Warnf("login request duplicate remote=%s", c.remoteHost)
-		_ = c.conn.Close()
-		return
-	}
-
 	firewalled := c.server.isFirewalled(c)
+	logging.Debugf("login decision remote=%s requestedID=%d firewalled=%t", c.remoteHost, req.ID, firewalled)
 	if firewalled {
 		c.hasLowID = true
 		c.info.LowID = true
 		c.sendServerMessage(c.server.TCP.MessageLowID)
 		id, ok := c.server.LowIDs.Add(c)
 		if !ok {
-			_ = c.conn.Close()
+			c.closeWithReason("lowid-pool-exhausted")
 			return
 		}
 		c.info.ID = id
@@ -301,73 +361,193 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		c.info.LowID = false
 		c.info.ID = c.info.IPv4
 	}
+	logging.Infof("login accepted remote=%s assignedID=%d lowID=%t port=%d", c.remoteHost, c.info.ID, c.info.LowID, c.info.Port)
 	c.handShake()
+}
+
+func (s *ServerRuntime) replaceSession(key string, client *tcpClient) {
+	if key == "" || client == nil {
+		return
+	}
+	s.sessionsMu.Lock()
+	old := s.sessions[key]
+	s.sessions[key] = client
+	s.sessionsMu.Unlock()
+	if old != nil && old != client {
+		logging.Infof("tcp replace-session key=%s old=%s new=%s", key, old.remoteHost, client.remoteHost)
+		old.closeWithReason(fmt.Sprintf("replaced-by-new-session(key=%s,new=%s)", key, client.remoteHost))
+	}
+}
+
+func (s *ServerRuntime) unregisterSession(key string, client *tcpClient) {
+	if key == "" || client == nil {
+		return
+	}
+	s.sessionsMu.Lock()
+	if cur, ok := s.sessions[key]; ok && cur == client {
+		delete(s.sessions, key)
+	}
+	s.sessionsMu.Unlock()
+}
+
+func loginSessionKey(hash []byte, id uint32) string {
+	if len(hash) == 16 {
+		return fmt.Sprintf("h:%x", hash)
+	}
+	if id != 0 {
+		return fmt.Sprintf("i:%08x", id)
+	}
+	return ""
 }
 
 func (c *tcpClient) handShake() {
 	storeID, err := c.server.Storage.Connect(c.info)
 	if err != nil {
 		logging.Warnf("storage connect failed remote=%s err=%v", c.remoteHost, err)
-		_ = c.conn.Close()
+		c.closeWithReason(fmt.Sprintf("storage-connect-failed: %v", err))
 		return
 	}
 	c.logged = true
 	c.info.StoreID = storeID
+	logging.Infof("login handshake complete remote=%s storeID=%d id=%d lowID=%t", c.remoteHost, c.info.StoreID, c.info.ID, c.info.LowID)
 
 	c.sendServerMessage(c.server.TCP.MessageLogin)
 	c.sendServerMessage(fmt.Sprintf("server version %s (%s)", ENodeVersionStr, ENodeName))
 	c.sendServerStatus()
+	c.startPeriodicServerStatus()
 	c.sendIDChange(c.info.ID)
 	c.sendServerIdent()
 }
 
-func (c *tcpClient) handleOfferFiles(data *Buffer) {
-	records, err := data.GetFileList()
-	if err != nil {
-		logging.Warnf("offer files parse failed remote=%s err=%v", c.remoteHost, err)
+func (c *tcpClient) setCloseReason(reason string) {
+	if reason == "" {
 		return
 	}
+	c.closeMu.Lock()
+	if c.closeReason == "" || c.closeReason == "read-loop-ended" {
+		c.closeReason = reason
+	}
+	c.closeMu.Unlock()
+}
+
+func (c *tcpClient) getCloseReason() string {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	if c.closeReason == "" {
+		return "unknown"
+	}
+	return c.closeReason
+}
+
+func (c *tcpClient) closeWithReason(reason string) {
+	c.setCloseReason(reason)
+	_ = c.conn.Close()
+}
+
+func (c *tcpClient) startPeriodicServerStatus() {
+	if c.statusStop != nil {
+		return
+	}
+	interval := c.server.TCP.ServerStatusInterval
+	if interval <= 0 {
+		return
+	}
+	c.statusStop = make(chan struct{})
+	go func(stop <-chan struct{}) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if c.logged {
+					c.sendServerStatus()
+				}
+			case <-stop:
+				return
+			}
+		}
+	}(c.statusStop)
+}
+
+func (c *tcpClient) handleOfferFiles(data *Buffer) {
+	raw := append([]byte(nil), data.Bytes()...)
+	records, err := data.GetFileList()
+	if err != nil {
+		previewLen := 96
+		if len(raw) < previewLen {
+			previewLen = len(raw)
+		}
+		previewHex := hex.EncodeToString(raw[:previewLen])
+		logging.Warnf("offer files parse failed remote=%s payloadLen=%d previewHex=%s err=%v",
+			c.remoteHost, len(raw), previewHex, err)
+		return
+	}
+	const maxOfferFilesLog = 50
+	logging.Debugf("offer files remote=%s count=%d payloadLen=%d", c.remoteHost, len(records), len(raw))
 	for _, record := range records {
 		file := fileFromRecord(record, c.info)
 		c.server.Storage.AddFile(file, c.info)
 	}
+	limit := len(records)
+	if limit > maxOfferFilesLog {
+		limit = maxOfferFilesLog
+	}
+	for i := 0; i < limit; i++ {
+		record := records[i]
+		file := fileFromRecord(record, c.info)
+		logging.Debugf("offer file remote=%s idx=%d hash=%x name=%q size=%d type=%q sourceID=%d sourcePort=%d",
+			c.remoteHost, i, record.Hash, file.Name, file.Size, file.Type, c.info.ID, c.info.Port)
+	}
+	if len(records) > maxOfferFilesLog {
+		logging.Debugf("offer files remote=%s truncated=%d", c.remoteHost, len(records)-maxOfferFilesLog)
+	}
 }
 
 func (c *tcpClient) handleGetServerList() {
+	logging.Debugf("tcp payload parsed remote=%s opcode=OP_GETSERVERLIST payload=empty", c.remoteHost)
 	c.sendServerList()
 	c.sendServerIdent()
 }
 
-func (c *tcpClient) handleGetSources(data *Buffer) {
+func (c *tcpClient) handleGetSources(data *Buffer, obfuscated bool) {
 	hash := append([]byte(nil), data.Get(16)...)
 	if len(hash) != 16 {
+		logging.Warnf("get sources parse failed remote=%s opcode=%s err=invalid-hash-len", c.remoteHost, opNameGetSources(obfuscated))
 		return
 	}
 	size, err := data.GetUInt32LE()
 	if err != nil {
+		logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opNameGetSources(obfuscated), err)
 		return
 	}
 	fileSize := uint64(size)
 	if fileSize == 0 {
 		v, err := data.GetUInt64LE()
 		if err != nil {
+			logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opNameGetSources(obfuscated), err)
 			return
 		}
 		fileSize = v
 	}
+	logging.Debugf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d",
+		c.remoteHost, opNameGetSources(obfuscated), hash, fileSize)
 	sources := c.server.Storage.GetSources(hash, fileSize)
+	logging.Debugf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
 	if len(sources) == 0 {
 		return
 	}
-	c.sendFoundSources(hash, sources)
+	c.sendFoundSources(hash, sources, obfuscated)
 }
 
 func (c *tcpClient) handleSearchRequest(data *Buffer) {
 	expr, err := ParseSearchExpr(data)
 	if err != nil {
+		logging.Warnf("search request parse failed remote=%s err=%v", c.remoteHost, err)
 		return
 	}
+	logging.Debugf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
 	files := c.server.Storage.FindBySearch(expr)
+	logging.Debugf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
 	if len(files) == 0 {
 		return
 	}
@@ -377,25 +557,39 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	lowID, err := data.GetUInt32LE()
 	if err != nil {
+		logging.Warnf("callback request parse failed remote=%s err=%v", c.remoteHost, err)
 		return
 	}
+	logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d", c.remoteHost, lowID)
 	v, ok := c.server.LowIDs.Get(lowID)
 	if !ok {
+		logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost, lowID)
 		c.sendCallbackFailed()
 		return
 	}
 	target, ok := v.(*tcpClient)
 	if !ok {
+		logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=invalid-target-type", c.remoteHost, lowID)
 		c.sendCallbackFailed()
 		return
 	}
+	logging.Debugf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d targetIPv4=%d targetPort=%d",
+		c.remoteHost, lowID, target.info.IPv4, target.info.Port)
 	if err := target.sendCallbackRequested(c.info.IPv4, c.info.Port); err != nil {
 		c.sendCallbackFailed()
 	}
 }
 
-func (c *tcpClient) sendFoundSources(hash []byte, sources []storage.Source) {
-	packet, err := BuildFoundSourcesPacket(hash, sources)
+func (c *tcpClient) sendFoundSources(hash []byte, sources []storage.Source, obfuscated bool) {
+	var (
+		packet *Buffer
+		err    error
+	)
+	if obfuscated {
+		packet, err = BuildFoundSourcesObfuPacket(hash, sources)
+	} else {
+		packet, err = BuildFoundSourcesPacket(hash, sources)
+	}
 	if err != nil {
 		return
 	}
@@ -485,12 +679,278 @@ func (c *tcpClient) writePacket(packet *Buffer) error {
 }
 
 func (c *tcpClient) writeRaw(data []byte) error {
-	LogTCPRaw("send", c.remoteHost, data)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	LogTCPRaw(c.module, "send", c.remoteHost, data)
+	c.logSendPayload(data)
 	if c.crypt != nil && c.crypt.State == CsEncrypting {
 		data = RC4Crypt(data, len(data), c.crypt.SendKey)
 	}
 	_, err := c.conn.Write(data)
 	return err
+}
+
+func (c *tcpClient) logSendPayload(raw []byte) {
+	proto, _, opcode, payload, ok := parseTCPRaw(raw)
+	if !ok {
+		return
+	}
+	if proto == PrZlib {
+		inflated, err := InflateZlibPayload(payload)
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send protocol=PR_ZLIB opcode=%s err=%v",
+				c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send protocol=PR_ZLIB opcode=%s compressedPayloadLen=%d decompressedPayloadLen=%d",
+			c.remoteHost, opcodeLabel(opcode), len(payload), len(inflated))
+		c.logSendPayloadByOpcode(opcode, inflated)
+		return
+	}
+	c.logSendPayloadByOpcode(opcode, payload)
+}
+
+func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
+	b := NewBufferFromBytes(payload)
+	switch opcode {
+	case OpServerMessage:
+		msg, err := b.GetString()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s message=%q", c.remoteHost, opcodeLabel(opcode), msg)
+	case OpServerStatus:
+		users, err := b.GetUInt32LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		files, err := b.GetUInt32LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s users=%d files=%d", c.remoteHost, opcodeLabel(opcode), users, files)
+	case OpIDChange:
+		id, err := b.GetUInt32LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		flags, err := b.GetUInt32LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s id=%d flags=%d", c.remoteHost, opcodeLabel(opcode), id, flags)
+	case OpServerList:
+		count, err := b.GetUInt8()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		entries := make([]string, 0, count)
+		limit := int(count)
+		if limit > 20 {
+			limit = 20
+		}
+		for i := 0; i < int(count); i++ {
+			ipv4, err := b.GetUInt32LE()
+			if err != nil {
+				logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+				return
+			}
+			port, err := b.GetUInt16LE()
+			if err != nil {
+				logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+				return
+			}
+			if i < limit {
+				entries = append(entries, fmt.Sprintf("{ip=%d,port=%d}", ipv4, port))
+			}
+		}
+		if int(count) > limit {
+			entries = append(entries, fmt.Sprintf("...+%d", int(count)-limit))
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s serverCount=%d servers=[%s]",
+			c.remoteHost, opcodeLabel(opcode), count, strings.Join(entries, ", "))
+	case OpServerIdent:
+		hash := b.Get(16)
+		if len(hash) != 16 {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=invalid-hash-len", c.remoteHost, opcodeLabel(opcode))
+			return
+		}
+		ipv4, err := b.GetUInt32LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		port, err := b.GetUInt16LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		tags, err := b.GetTags()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s hash=%x ip=%d port=%d tags=%s",
+			c.remoteHost, opcodeLabel(opcode), hash, ipv4, port, formatNamedTags(tags, 24))
+	case OpFoundSources:
+		hash, count, entries, err := parseFoundSourcesPayload(payload, false, 20)
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
+			c.remoteHost, opcodeLabel(opcode), hash, count, len(payload), entries)
+	case OpFoundSourcesObfu:
+		hash, count, entries, err := parseFoundSourcesPayload(payload, true, 20)
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
+			c.remoteHost, opcodeLabel(opcode), hash, count, len(payload), entries)
+	case OpSearchResult:
+		files, err := b.GetFileList()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s resultCount=%d files=%s",
+			c.remoteHost, opcodeLabel(opcode), len(files), formatFileRecordsForLog(files, 5))
+	case OpCallbackReqd:
+		ipv4, err := b.GetUInt32LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		port, err := b.GetUInt16LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s targetIP=%d targetPort=%d",
+			c.remoteHost, opcodeLabel(opcode), ipv4, port)
+	case OpCallbackFailed:
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s payload=empty", c.remoteHost, opcodeLabel(opcode))
+	default:
+		previewLen := len(payload)
+		if previewLen > 128 {
+			previewLen = 128
+		}
+		logging.Debugf("tcp payload parsed remote=%s dir=send opcode=%s payloadLen=%d previewHex=%s",
+			c.remoteHost, opcodeLabel(opcode), len(payload), hex.EncodeToString(payload[:previewLen]))
+	}
+}
+
+func parseFoundSourcesPayload(payload []byte, withObfu bool, limit int) ([]byte, int, string, error) {
+	b := NewBufferFromBytes(payload)
+	hash := b.Get(16)
+	if len(hash) != 16 {
+		return nil, 0, "", fmt.Errorf("invalid-hash-len")
+	}
+	count, err := b.GetUInt8()
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	n := int(count)
+	if n > limit {
+		n = limit
+	}
+	parts := make([]string, 0, n+1)
+	for i := 0; i < int(count); i++ {
+		id, err := b.GetUInt32LE()
+		if err != nil {
+			return nil, 0, "", err
+		}
+		port, err := b.GetUInt16LE()
+		if err != nil {
+			return nil, 0, "", err
+		}
+		if withObfu {
+			obf, err := b.GetUInt8()
+			if err != nil {
+				return nil, 0, "", err
+			}
+			if (obf & 0x80) != 0 {
+				userHash := b.Get(16)
+				if len(userHash) != 16 {
+					return nil, 0, "", ErrOutOfBounds
+				}
+				if i < n {
+					parts = append(parts, fmt.Sprintf("{id=%d,port=%d,obfSettings=0x%02x,userHash=%x}", id, port, obf, userHash))
+				}
+				continue
+			}
+			if i < n {
+				parts = append(parts, fmt.Sprintf("{id=%d,port=%d,obfSettings=0x%02x}", id, port, obf))
+			}
+			continue
+		}
+		if i < n {
+			parts = append(parts, fmt.Sprintf("{id=%d,port=%d}", id, port))
+		}
+	}
+	if int(count) > n {
+		parts = append(parts, fmt.Sprintf("...+%d", int(count)-n))
+	}
+	return hash, int(count), "[" + strings.Join(parts, ", ") + "]", nil
+}
+
+func formatFileRecordsForLog(files []FileRecord, limit int) string {
+	if len(files) == 0 {
+		return "[]"
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	n := len(files)
+	if n > limit {
+		n = limit
+	}
+	parts := make([]string, 0, n+1)
+	for i := 0; i < n; i++ {
+		name, _ := files[i].Tags["name"].(string)
+		parts = append(parts, fmt.Sprintf("{hash=%x,id=%d,port=%d,size=%d,name=%q}", files[i].Hash, files[i].ID, files[i].Port, files[i].Size, name))
+	}
+	if len(files) > n {
+		parts = append(parts, fmt.Sprintf("...+%d", len(files)-n))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func opcodeLabel(opcode uint8) string {
+	switch opcode {
+	case OpServerMessage:
+		return "OP_SERVERMESSAGE"
+	case OpServerStatus:
+		return "OP_SERVERSTATUS"
+	case OpIDChange:
+		return "OP_IDCHANGE"
+	case OpServerList:
+		return "OP_SERVERLIST"
+	case OpServerIdent:
+		return "OP_SERVERIDENT"
+	case OpFoundSources:
+		return "OP_FOUNDSOURCES"
+	case OpFoundSourcesObfu:
+		return "OP_FOUNDSOURCES_OBFU"
+	case OpSearchResult:
+		return "OP_SEARCHRESULT"
+	case OpCallbackReqd:
+		return "OP_CALLBACKREQD"
+	case OpCallbackFailed:
+		return "OP_CALLBACKFAILED"
+	default:
+		return fmt.Sprintf("0x%02x", opcode)
+	}
 }
 
 func (s *ServerRuntime) isFirewalled(client *tcpClient) bool {
@@ -630,7 +1090,7 @@ func writeWithDeadline(conn net.Conn, data []byte, timeout time.Duration) error 
 	return err
 }
 
-func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	for b.Pos()+16 <= len(b.Bytes()) {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
@@ -644,11 +1104,11 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *
 		if err != nil {
 			continue
 		}
-		_ = udpSend(conn, remote, packet.Bytes(), crypt)
+		_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 	}
 }
 
-func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	for b.Pos()+20 <= len(b.Bytes()) {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
@@ -674,11 +1134,11 @@ func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn 
 		if err != nil {
 			continue
 		}
-		_ = udpSend(conn, remote, packet.Bytes(), crypt)
+		_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 	}
 }
 
-func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	challenge, err := b.GetUInt32LE()
 	if err != nil {
 		return
@@ -696,18 +1156,18 @@ func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn 
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt)
+	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 
-func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	packet, err := BuildServerDescResOldPacket(s.UDP.Name, s.UDP.Description)
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt)
+	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 
-func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	challenge, err := b.GetUInt32LE()
 	if err != nil {
 		return
@@ -720,10 +1180,10 @@ func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn *net
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt)
+	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 
-func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	expr, err := ParseSearchExpr(b)
 	if err != nil {
 		return
@@ -737,11 +1197,11 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn *n
 		return
 	}
 	for _, packet := range packets {
-		_ = udpSend(conn, remote, packet.Bytes(), crypt)
+		_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 	}
 }
 
-func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	_, _ = b.GetTags()
 	expr, err := ParseSearchExpr(b)
 	if err != nil {
@@ -756,12 +1216,12 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *
 		return
 	}
 	for _, packet := range packets {
-		_ = udpSend(conn, remote, packet.Bytes(), crypt)
+		_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 	}
 }
 
-func udpSend(conn *net.UDPConn, remote *net.UDPAddr, data []byte, crypt *UDPCrypt) error {
-	LogUDPRaw("send", remote.String(), data)
+func udpSend(conn *net.UDPConn, remote *net.UDPAddr, data []byte, crypt *UDPCrypt, module string) error {
+	LogUDPRaw(module, "send", remote.String(), data)
 	if crypt != nil && crypt.Status == CsEncrypting {
 		data = crypt.Encrypt(data)
 	}
@@ -822,4 +1282,63 @@ func splitHost(addr string) string {
 		}
 	}
 	return addr
+}
+
+func tcpModule(enableCrypt bool) string {
+	if enableCrypt {
+		return "tcp-obfs"
+	}
+	return "tcp"
+}
+
+func opNameGetSources(obfuscated bool) string {
+	if obfuscated {
+		return "OP_GETSOURCES_OBFU"
+	}
+	return "OP_GETSOURCES"
+}
+
+func formatNamedTags(tags []NamedTag, limit int) string {
+	if len(tags) == 0 {
+		return "[]"
+	}
+	if limit <= 0 {
+		limit = 32
+	}
+	n := len(tags)
+	if n > limit {
+		n = limit
+	}
+	parts := make([]string, 0, n+1)
+	for i := 0; i < n; i++ {
+		parts = append(parts, fmt.Sprintf("%s=%v", tags[i].Name, tags[i].Value))
+	}
+	if len(tags) > n {
+		parts = append(parts, fmt.Sprintf("...+%d", len(tags)-n))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func formatSearchExpr(expr *storage.SearchExpr) string {
+	if expr == nil {
+		return "<nil>"
+	}
+	switch expr.Kind {
+	case storage.SearchText:
+		return fmt.Sprintf("TEXT(%q)", expr.Text)
+	case storage.SearchString:
+		return fmt.Sprintf("STRING(tag=0x%x,val=%q)", expr.TagType, expr.ValueString)
+	case storage.SearchUInt32:
+		return fmt.Sprintf("U32(tag=0x%x,val=%d)", expr.TagType, expr.ValueUint)
+	case storage.SearchUInt64:
+		return fmt.Sprintf("U64(tag=0x%x,val=%d)", expr.TagType, expr.ValueUint)
+	case storage.SearchAnd:
+		return fmt.Sprintf("AND(%s,%s)", formatSearchExpr(expr.Left), formatSearchExpr(expr.Right))
+	case storage.SearchOr:
+		return fmt.Sprintf("OR(%s,%s)", formatSearchExpr(expr.Left), formatSearchExpr(expr.Right))
+	case storage.SearchAndNot:
+		return fmt.Sprintf("ANDNOT(%s,%s)", formatSearchExpr(expr.Left), formatSearchExpr(expr.Right))
+	default:
+		return fmt.Sprintf("UNKNOWN(kind=%d)", expr.Kind)
+	}
 }

@@ -32,7 +32,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SERVERLIST` | `0x32` | Server -> Client | Response with known servers. |
 | `OP_SERVERIDENT` | `0x41` | Server -> Client | Server identity/tags response. |
 | `OP_FOUNDSOURCES` | `0x42` | Server -> Client | Source list for requested file. |
-| `OP_FOUNDSOURCES_OBFU` | `0x44` | Server -> Client | Obfuscated found-sources variant (reserved/not fully wired). |
+| `OP_FOUNDSOURCES_OBFU` | `0x44` | Server -> Client | Obfuscated found-sources response (adds per-source obfuscation settings byte). |
 | `OP_SEARCHRESULT` | `0x33` | Server -> Client | Search results list. |
 | `OP_CALLBACKREQUESTED` | `0x35` | Server -> LowID client | Notify LowID client to connect back. |
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
@@ -86,6 +86,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SERVERLIST` | Server -> Client | `serverCount(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` |
 | `OP_SERVERIDENT` | Server -> Client | `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags` |
 | `OP_FOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
+| `OP_FOUNDSOURCES_OBFU` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry + obfSettings(uint8) [+ userHash(hash16) if obfSettings&0x80])` |
 | `OP_SEARCHRESULT` | Server -> Client | `resultCount(uint32) + repeated(fileRecord)`; `fileRecord = fileHash(hash16) + sourceID(uint32) + sourcePort(uint16) + tags` |
 | `OP_CALLBACKREQUESTED` | Server -> LowID Client | `targetIP(uint32) + targetPort(uint16)` |
 | `OP_CALLBACKFAILED` | Server -> Client | Empty payload |

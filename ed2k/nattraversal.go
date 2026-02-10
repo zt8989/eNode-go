@@ -50,8 +50,14 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 	if len(data) == 0 || remote == nil || conn == nil {
 		return
 	}
+	LogNATRaw("nat", "recv", remote.String(), data)
 	local, _ := conn.LocalAddr().(*net.UDPAddr)
 	for _, out := range h.processPacket(data, remote, local) {
+		target := ""
+		if out.to != nil {
+			target = out.to.String()
+		}
+		LogNATRaw("nat", "send", target, out.packet)
 		_, _ = conn.WriteToUDP(out.packet, out.to)
 	}
 }
