@@ -7,6 +7,8 @@ messageLowID: "You have LowID."
 messageLogin: "Welcome to eNode!"
 
 noAssert: false
+logLevel: "debug"
+logFile: "logs/enode.log"
 
 supportCrypt: true
 requestCrypt: true
