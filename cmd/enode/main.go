@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"time"
 
 	"enode/config"
@@ -97,7 +98,8 @@ func main() {
 	defer ln.Close()
 	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
 
-	udpConn, err := ed2k.RunUDPServer(udpCfg, runtime.UDPHandler(false))
+	udpHandler := runtime.UDPHandler(false)
+	udpConn, err := ed2k.RunUDPServer(udpCfg, udpHandler)
 	if err != nil {
 		logging.Fatalf("udp server failed: %v", err)
 	}
@@ -107,7 +109,14 @@ func main() {
 	if cfg.NAT.Enabled {
 		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
 		natHandler := ed2k.NewNATTraversalHandler(natTTL)
-		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.NAT.Port)
+		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.UDP.Port)
+		natAwareUDPHandler := func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
+			if len(data) > 0 && data[0] == ed2k.PrNat {
+				natHandler.HandlePacket(data, remote, conn)
+				return
+			}
+			udpHandler(data, remote, conn)
+		}
 		effectiveIP := cfg.DynIP
 		if effectiveIP == "" {
 			effectiveIP = cfg.Address
@@ -115,13 +124,19 @@ func main() {
 		if effectiveIP == "" || effectiveIP == "0.0.0.0" {
 			logging.Warnf("nat register endpoint unresolved: dynIp=%q address=%q, clients may receive serverIP=0.0.0.0", cfg.DynIP, cfg.Address)
 		}
-		stopCleanup := natHandler.StartCleanup(time.Minute)
+		cleanupInterval := natTTL / 2
+		if cleanupInterval < 5*time.Second {
+			cleanupInterval = 5 * time.Second
+		} else if cleanupInterval > time.Minute {
+			cleanupInterval = time.Minute
+		}
+		stopCleanup := natHandler.StartCleanup(cleanupInterval)
 		defer stopCleanup()
 
 		natConn, err := ed2k.RunUDPServer(ed2k.UDPServerConfig{
 			Address: cfg.Address,
 			Port:    cfg.NAT.Port,
-		}, natHandler.HandlePacket)
+		}, natAwareUDPHandler)
 		if err != nil {
 			logging.Fatalf("nat traversal udp server failed: %v", err)
 		}

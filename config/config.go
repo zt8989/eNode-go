@@ -123,7 +123,7 @@ func setDefaults(cfg *Config) {
 		cfg.NAT.Port = 2004
 	}
 	if cfg.NAT.RegistrationTTLSeconds <= 0 {
-		cfg.NAT.RegistrationTTLSeconds = 600
+		cfg.NAT.RegistrationTTLSeconds = 30
 	}
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"

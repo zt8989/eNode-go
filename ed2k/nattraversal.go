@@ -14,8 +14,8 @@ import (
 
 const (
 	DefaultNATTraversalPort = 2004
-	defaultNATRegistryTTL   = 10 * time.Minute
-	defaultNATCleanupEvery  = time.Minute
+	defaultNATRegistryTTL   = 30 * time.Second
+	defaultNATCleanupEvery  = 10 * time.Second
 )
 
 type NATTraversalConfig struct {

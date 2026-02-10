@@ -38,7 +38,7 @@ storage:
 	if cfg.LogLevel != "info" || cfg.LogFile != "logs/enode.log" {
 		t.Fatalf("bad log defaults: level=%q file=%q", cfg.LogLevel, cfg.LogFile)
 	}
-	if cfg.NAT.Port != 2004 || cfg.NAT.RegistrationTTLSeconds != 600 {
+	if cfg.NAT.Port != 2004 || cfg.NAT.RegistrationTTLSeconds != 30 {
 		t.Fatalf("bad nat defaults: %+v", cfg.NAT)
 	}
 	s := cfg.StorageEngineConfig()

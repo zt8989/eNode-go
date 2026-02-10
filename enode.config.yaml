@@ -36,7 +36,7 @@ udp:
 natTraversal:
   enabled: true
   port: 2004
-  registrationTTLSeconds: 600
+  registrationTTLSeconds: 30
 
 storage:
   engine: memory
