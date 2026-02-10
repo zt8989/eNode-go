@@ -99,18 +99,12 @@ func main() {
 	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
 
 	udpHandler := runtime.UDPHandler(false)
-	udpConn, err := ed2k.RunUDPServer(udpCfg, udpHandler)
-	if err != nil {
-		logging.Fatalf("udp server failed: %v", err)
-	}
-	defer udpConn.Close()
-	logging.Infof("listening: udp %s:%d", udpCfg.Address, udpCfg.Port)
-
+	udpMainHandler := udpHandler
 	if cfg.NAT.Enabled {
 		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
 		natHandler := ed2k.NewNATTraversalHandler(natTTL)
 		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.UDP.Port)
-		natAwareUDPHandler := func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
+		udpMainHandler = func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
 			if len(data) > 0 && data[0] == ed2k.PrNat {
 				natHandler.HandlePacket(data, remote, conn)
 				return
@@ -136,13 +130,20 @@ func main() {
 		natConn, err := ed2k.RunUDPServer(ed2k.UDPServerConfig{
 			Address: cfg.Address,
 			Port:    cfg.NAT.Port,
-		}, natAwareUDPHandler)
+		}, udpMainHandler)
 		if err != nil {
 			logging.Fatalf("nat traversal udp server failed: %v", err)
 		}
 		defer natConn.Close()
 		logging.Infof("listening: nat-udp %s:%d", cfg.Address, cfg.NAT.Port)
 	}
+
+	udpConn, err := ed2k.RunUDPServer(udpCfg, udpMainHandler)
+	if err != nil {
+		logging.Fatalf("udp server failed: %v", err)
+	}
+	defer udpConn.Close()
+	logging.Infof("listening: udp %s:%d", udpCfg.Address, udpCfg.Port)
 
 	if cfg.SupportCrypt {
 		tcpCryptCfg := tcpCfg
