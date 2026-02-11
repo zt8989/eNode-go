@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 	"time"
 
 	"enode/config"
@@ -12,9 +14,21 @@ import (
 	"enode/storage"
 )
 
+const backgroundEnvKey = "ENODE_BACKGROUND"
+
 func main() {
 	configPath := flag.String("config", "enode.config.yaml", "path to YAML config")
+	daemon := flag.Bool("daemon", false, "run in background")
 	flag.Parse()
+
+	if *daemon && os.Getenv(backgroundEnvKey) != "1" {
+		pid, err := startBackgroundProcess(filterDaemonArgs(os.Args[1:]))
+		if err != nil {
+			log.Fatalf("start background process failed: %v", err)
+		}
+		log.Printf("enode started in background, pid=%d", pid)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -162,4 +176,46 @@ func main() {
 	}
 
 	select {}
+}
+
+func startBackgroundProcess(args []string) (int, error) {
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), backgroundEnvKey+"=1")
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer devNull.Close()
+
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+
+	return cmd.Process.Pid, nil
+}
+
+func filterDaemonArgs(args []string) []string {
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-daemon" {
+			continue
+		}
+		if arg == "--daemon" {
+			continue
+		}
+		if arg == "-daemon=true" || arg == "--daemon=true" {
+			continue
+		}
+		if arg == "-daemon=false" || arg == "--daemon=false" {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
 }

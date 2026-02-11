@@ -40,8 +40,9 @@ func LogNATRaw(module string, dir string, remote string, raw []byte) {
 		logging.Debugf(formatLogLine(module, "nat", dir, remote, "-", "-", "-", "-"))
 		return
 	}
-	logging.Debugf(formatLogLine(module, "nat", dir, remote, protocolName(proto), opcodeName(opcode, dir),
-		fmt.Sprintf("%d", size), fmt.Sprintf("%d", len(payload))))
+	base := formatLogLine(module, "nat", dir, remote, protocolName(proto), opcodeName(opcode, dir),
+		fmt.Sprintf("%d", size), fmt.Sprintf("%d", len(payload)))
+	logging.Debugf("%s, payload=%s", base, formatKV(formatNATPayload(opcode, payload)))
 }
 
 func parseTCPRaw(raw []byte) (uint8, uint32, uint8, []byte, bool) {

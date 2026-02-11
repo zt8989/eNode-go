@@ -105,7 +105,6 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 		return
 	}
 	LogNATRaw("nat", "recv", remote.String(), data)
-	logNATPayload("recv", remote.String(), data)
 	localPort := uint16(0)
 	if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr != nil && localAddr.Port > 0 {
 		localPort = uint16(localAddr.Port)
@@ -116,7 +115,6 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 			target = out.to.String()
 		}
 		LogNATRaw("nat", "send", target, out.packet)
-		logNATPayload("send", target, out.packet)
 		_, _ = conn.WriteToUDP(out.packet, out.to)
 	}
 }
@@ -398,15 +396,6 @@ func ipv4ToUint32(ip net.IP) uint32 {
 		return 0
 	}
 	return binary.BigEndian.Uint32(v4)
-}
-
-func logNATPayload(dir string, remote string, raw []byte) {
-	opcode, payload, ok := decodeNATPacket(raw)
-	if !ok {
-		return
-	}
-	logging.Debugf("[module=nat] dir=%s, remote=%s, opcode=%s, payload=%s",
-		dir, remote, natOpcodeLabel(opcode), formatNATPayload(opcode, payload))
 }
 
 func natOpcodeLabel(opcode uint8) string {
