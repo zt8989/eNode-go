@@ -104,7 +104,9 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 	if len(data) == 0 || remote == nil || conn == nil {
 		return
 	}
-	LogNATRaw("nat", "recv", remote.String(), data)
+	if data[0] == PrNat {
+		LogNATRaw("nat", "recv", remote.String(), data)
+	}
 	localPort := uint16(0)
 	if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr != nil && localAddr.Port > 0 {
 		localPort = uint16(localAddr.Port)
@@ -114,7 +116,9 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 		if out.to != nil {
 			target = out.to.String()
 		}
-		LogNATRaw("nat", "send", target, out.packet)
+		if len(out.packet) > 0 && out.packet[0] == PrNat {
+			LogNATRaw("nat", "send", target, out.packet)
+		}
 		_, _ = conn.WriteToUDP(out.packet, out.to)
 	}
 }
