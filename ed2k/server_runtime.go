@@ -47,6 +47,7 @@ type ServerRuntime struct {
 	UDP     UDPRuntimeConfig
 	Storage storage.Engine
 	LowIDs  *LowIDClients
+	NAT     *NATTraversalHandler
 
 	sessionsMu sync.Mutex
 	sessions   map[string]*tcpClient
@@ -72,6 +73,10 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 	}
 }
 
+func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
+	s.NAT = handler
+}
+
 func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, *net.UDPConn) {
 	crypt := NewUDPCrypt(enableCrypt, s.UDP.UDPServerKey)
 	module := "udp"
@@ -84,6 +89,14 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		}
 		if crypt != nil && crypt.Status == CsEncrypting {
 			data = crypt.Decrypt(data)
+		}
+		if s.NAT != nil {
+			if data[0] == PrNat || len(data) == 1 {
+				s.NAT.HandlePacket(data, remote, conn)
+				if data[0] == PrNat {
+					return
+				}
+			}
 		}
 		LogUDPRaw(module, "recv", remote.String(), data)
 		b := NewBufferFromBytes(data)

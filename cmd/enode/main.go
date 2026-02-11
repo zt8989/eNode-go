@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"time"
 
 	"enode/config"
@@ -98,19 +97,15 @@ func main() {
 	defer ln.Close()
 	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
 
-	udpHandler := runtime.UDPHandler(false)
-	udpMainHandler := udpHandler
+	udpMainHandler := runtime.UDPHandler(false)
 	if cfg.NAT.Enabled {
 		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
 		natHandler := ed2k.NewNATTraversalHandler(natTTL)
 		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.UDP.Port)
-		udpMainHandler = func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
-			if len(data) > 0 && data[0] == ed2k.PrNat {
-				natHandler.HandlePacket(data, remote, conn)
-				return
-			}
-			udpHandler(data, remote, conn)
+		if cfg.SupportCrypt && cfg.UDP.PortObfuscated != 0 {
+			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortObfuscated, cfg.UDP.PortObfuscated)
 		}
+		runtime.SetNATHandler(natHandler)
 		effectiveIP := cfg.DynIP
 		if effectiveIP == "" {
 			effectiveIP = cfg.Address

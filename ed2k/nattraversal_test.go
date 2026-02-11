@@ -18,8 +18,8 @@ func TestNATRegisterAndSync2(t *testing.T) {
 	hashA := bytes.Repeat([]byte{0x11}, 16)
 	hashB := bytes.Repeat([]byte{0x22}, 16)
 
-	outA := handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA)
-	outB := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB)
+	outA := handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA, uint16(local.Port))
+	outB := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB, uint16(local.Port))
 	if len(outA) != 1 || len(outB) != 1 {
 		t.Fatalf("register responses mismatch")
 	}
@@ -47,7 +47,7 @@ func TestNATRegisterAndSync2(t *testing.T) {
 
 	connAck := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	sync2Payload := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
-	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA)
+	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA, uint16(local.Port))
 	if len(outs) != 2 {
 		t.Fatalf("sync2 responses len=%d", len(outs))
 	}
@@ -95,16 +95,16 @@ func TestNATSync2AfterBothRegisteredReturnsNatSync(t *testing.T) {
 	hashA := []byte{0x46, 0xa7, 0xde, 0xd3, 0x6e, 0x0e, 0xd3, 0xba, 0xbd, 0x84, 0x02, 0xea, 0x5d, 0xfe, 0x6f, 0x7e}
 	hashB := []byte{0xe9, 0x27, 0x88, 0xe7, 0x52, 0x0e, 0x75, 0x3c, 0xb6, 0x74, 0xb2, 0xdf, 0x37, 0x45, 0x6f, 0x9f}
 
-	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA); len(got) != 1 {
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA, 2004); len(got) != 1 {
 		t.Fatalf("register A responses len=%d", len(got))
 	}
-	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB); len(got) != 1 {
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB, 2004); len(got) != 1 {
 		t.Fatalf("register B responses len=%d", len(got))
 	}
 
 	connAck := []byte{0xc3, 0x2e, 0x00, 0x15}
 	sync2 := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
-	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2), remoteA)
+	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2), remoteA, 2004)
 	if len(outs) != 2 {
 		t.Fatalf("sync2 responses len=%d", len(outs))
 	}
@@ -130,10 +130,10 @@ func TestNATSync2TargetNotRegistered(t *testing.T) {
 	hashA := bytes.Repeat([]byte{0x33}, 16)
 	hashUnknown := bytes.Repeat([]byte{0x44}, 16)
 
-	_ = handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA)
+	_ = handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA, 2004)
 	connAck := []byte{1, 2, 3, 4}
 	sync2Payload := append(append(append([]byte(nil), hashA...), connAck...), hashUnknown...)
-	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA)
+	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA, 2004)
 	if len(outs) != 1 {
 		t.Fatalf("responses len=%d", len(outs))
 	}
@@ -164,7 +164,7 @@ func TestNATRegisterUsesConfiguredEndpoint(t *testing.T) {
 	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
 	hash := bytes.Repeat([]byte{0x55}, 16)
 
-	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote)
+	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004)
 	if len(outs) != 1 {
 		t.Fatalf("responses len=%d", len(outs))
 	}
@@ -190,7 +190,7 @@ func TestNATRegisterWildcardLocalWithoutConfiguredEndpoint(t *testing.T) {
 	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
 	hash := bytes.Repeat([]byte{0x66}, 16)
 
-	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote)
+	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004)
 	if len(outs) != 1 {
 		t.Fatalf("responses len=%d", len(outs))
 	}
@@ -203,5 +203,125 @@ func TestNATRegisterWildcardLocalWithoutConfiguredEndpoint(t *testing.T) {
 	gotIP := binary.BigEndian.Uint32(payload[2:6])
 	if gotIP != 0 {
 		t.Fatalf("ip=%d want=0", gotIP)
+	}
+}
+
+func TestNATRegisterUsesObfuscatedPortByLocalListener(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	handler.SetRegisterEndpoint("66.154.127.95", 2004)
+	handler.SetRegisterEndpointForLocalPort(5559, 5559)
+
+	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	hash := bytes.Repeat([]byte{0x77}, 16)
+
+	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 5559)
+	if len(outs) != 1 {
+		t.Fatalf("responses len=%d", len(outs))
+	}
+	_, payload, ok := decodeNATPacket(outs[0].packet)
+	if !ok || len(payload) != 6 {
+		t.Fatalf("bad register ack")
+	}
+	gotPort := binary.BigEndian.Uint16(payload[0:2])
+	if gotPort != 5559 {
+		t.Fatalf("port=%d want=5559", gotPort)
+	}
+}
+
+func TestNATEntriesSharedAcrossAllListenerPorts(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	handler.SetRegisterEndpoint("66.154.127.95", 2004)
+	handler.SetRegisterEndpointForLocalPort(5559, 5559) // udp obfuscated
+
+	remoteA := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	remoteB := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 40002}
+
+	hashA := bytes.Repeat([]byte{0x88}, 16)
+	hashB := bytes.Repeat([]byte{0x99}, 16)
+
+	// Register A from natTraversal.port (example: 2004)
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA, 2004); len(got) != 1 {
+		t.Fatalf("register A responses len=%d", len(got))
+	}
+	// Register B from udp.portObfuscated (example: 5559)
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB, 5559); len(got) != 1 {
+		t.Fatalf("register B responses len=%d", len(got))
+	}
+
+	// Send sync2 from udp.port and ensure cross-port registry lookup succeeds.
+	connAck := []byte{0x12, 0x34, 0x56, 0x78}
+	sync2Payload := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
+	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA, 5555)
+	if len(outs) != 2 {
+		t.Fatalf("sync2 responses len=%d", len(outs))
+	}
+	for i, out := range outs {
+		opcode, _, ok := decodeNATPacket(out.packet)
+		if !ok {
+			t.Fatalf("decode out[%d] failed", i)
+		}
+		if opcode != OpNatSync {
+			t.Fatalf("out[%d] opcode=%#x want=%#x", i, opcode, OpNatSync)
+		}
+	}
+}
+
+func TestNATKeepaliveOneByteRefreshesLastSeen(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	hash := bytes.Repeat([]byte{0xaa}, 16)
+
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004); len(got) != 1 {
+		t.Fatalf("register responses len=%d", len(got))
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	entryBefore, ok := handler.get(key)
+	if !ok {
+		t.Fatalf("entry not found after register")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	outs := handler.processPacket([]byte{0x42}, remote, 2004)
+	if len(outs) != 0 {
+		t.Fatalf("keepalive should not generate outbound packets")
+	}
+
+	entryAfter, ok := handler.get(key)
+	if !ok {
+		t.Fatalf("entry missing after keepalive")
+	}
+	if !entryAfter.lastSeen.After(entryBefore.lastSeen) {
+		t.Fatalf("lastSeen not refreshed: before=%v after=%v", entryBefore.lastSeen, entryAfter.lastSeen)
+	}
+}
+
+func TestNATKeepaliveOpcodeRefreshesLastSeen(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	hash := bytes.Repeat([]byte{0xbb}, 16)
+
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004); len(got) != 1 {
+		t.Fatalf("register responses len=%d", len(got))
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	entryBefore, ok := handler.get(key)
+	if !ok {
+		t.Fatalf("entry not found after register")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	outs := handler.processPacket(encodeNATPacket(OpNatKeepAlive, nil), remote, 2004)
+	if len(outs) != 0 {
+		t.Fatalf("nat keepalive should not generate outbound packets")
+	}
+
+	entryAfter, ok := handler.get(key)
+	if !ok {
+		t.Fatalf("entry missing after nat keepalive")
+	}
+	if !entryAfter.lastSeen.After(entryBefore.lastSeen) {
+		t.Fatalf("lastSeen not refreshed: before=%v after=%v", entryBefore.lastSeen, entryAfter.lastSeen)
 	}
 }

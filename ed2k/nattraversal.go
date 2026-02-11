@@ -36,11 +36,12 @@ type natOutbound struct {
 }
 
 type NATTraversalHandler struct {
-	mu           sync.RWMutex
-	ttl          time.Duration
-	entries      map[[16]byte]natClientEntry
-	announceIPv4 uint32
-	announcePort uint16
+	mu                  sync.RWMutex
+	ttl                 time.Duration
+	entries             map[[16]byte]natClientEntry
+	announceIPv4        uint32
+	announcePort        uint16
+	announcePortByLocal map[uint16]uint16
 }
 
 func NewNATTraversalHandler(registrationTTL time.Duration) *NATTraversalHandler {
@@ -48,8 +49,9 @@ func NewNATTraversalHandler(registrationTTL time.Duration) *NATTraversalHandler 
 		registrationTTL = defaultNATRegistryTTL
 	}
 	return &NATTraversalHandler{
-		ttl:     registrationTTL,
-		entries: map[[16]byte]natClientEntry{},
+		ttl:                 registrationTTL,
+		entries:             map[[16]byte]natClientEntry{},
+		announcePortByLocal: map[uint16]uint16{},
 	}
 }
 
@@ -84,13 +86,31 @@ func (h *NATTraversalHandler) SetRegisterEndpoint(ip string, port uint16) {
 	}
 }
 
+// SetRegisterEndpointForLocalPort overrides the OP_NAT_REGISTER ACK port
+// based on the local listener port which received the registration packet.
+func (h *NATTraversalHandler) SetRegisterEndpointForLocalPort(localPort uint16, announcePort uint16) {
+	if h == nil || localPort == 0 || announcePort == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.announcePortByLocal == nil {
+		h.announcePortByLocal = map[uint16]uint16{}
+	}
+	h.announcePortByLocal[localPort] = announcePort
+}
+
 func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
 	if len(data) == 0 || remote == nil || conn == nil {
 		return
 	}
 	LogNATRaw("nat", "recv", remote.String(), data)
 	logNATPayload("recv", remote.String(), data)
-	for _, out := range h.processPacket(data, remote) {
+	localPort := uint16(0)
+	if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr != nil && localAddr.Port > 0 {
+		localPort = uint16(localAddr.Port)
+	}
+	for _, out := range h.processPacket(data, remote, localPort) {
 		target := ""
 		if out.to != nil {
 			target = out.to.String()
@@ -121,12 +141,19 @@ func (h *NATTraversalHandler) StartCleanup(interval time.Duration) func() {
 	return func() { close(stop) }
 }
 
-func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr) []natOutbound {
+func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, localPort uint16) []natOutbound {
 	if len(data) == 0 || remote == nil {
 		return nil
 	}
+	if len(data) == 1 {
+		matched := h.touchByAddr(remote)
+		logging.Debugf(
+			"[module=nat] dir=recv, remote=%s, opcode=KEEPALIVE(1-byte), value=0x%02x, matched=%t",
+			remote.String(), data[0], matched,
+		)
+		return nil
+	}
 	if data[0] != PrNat {
-		h.touchByAddr(remote)
 		return nil
 	}
 	opcode, payload, ok := decodeNATPacket(data)
@@ -135,7 +162,14 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr) []
 	}
 	switch opcode {
 	case OpNatRegister:
-		return h.handleRegister(remote, payload)
+		return h.handleRegister(remote, payload, localPort)
+	case OpNatKeepAlive:
+		matched := h.touchByAddr(remote)
+		logging.Debugf(
+			"[module=nat] dir=recv, remote=%s, opcode=%s, payloadLen=%d, matched=%t",
+			remote.String(), natOpcodeLabel(OpNatKeepAlive), len(payload), matched,
+		)
+		return nil
 	case OpNatSync2:
 		return h.handleSync2(remote, payload)
 	default:
@@ -143,7 +177,7 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr) []
 	}
 }
 
-func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte) []natOutbound {
+func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte, localPort uint16) []natOutbound {
 	if len(payload) < 16 {
 		return nil
 	}
@@ -154,6 +188,9 @@ func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte
 	resp := make([]byte, 6)
 	h.mu.RLock()
 	port := h.announcePort
+	if p, ok := h.announcePortByLocal[localPort]; ok && p != 0 {
+		port = p
+	}
 	ipv4 := h.announceIPv4
 	h.mu.RUnlock()
 	binary.BigEndian.PutUint16(resp[0:2], port)
@@ -242,7 +279,7 @@ func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr) {
 	}
 }
 
-func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) {
+func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
@@ -250,9 +287,10 @@ func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) {
 		if v.addr.IP.Equal(remote.IP) && v.addr.Port == remote.Port {
 			v.lastSeen = now
 			h.entries[k] = v
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func (h *NATTraversalHandler) get(hash [16]byte) (natClientEntry, bool) {
@@ -381,6 +419,8 @@ func natOpcodeLabel(opcode uint8) string {
 		return "OP_NATSYNC(0xe1)"
 	case OpNatFailed:
 		return "OP_NATFAILED(0xe5)"
+	case OpNatKeepAlive:
+		return "OP_NATKEEPALIVE(0xe6)"
 	case OpNatPing:
 		return "OP_NATPING(0xe2)"
 	case OpNatReping:
@@ -427,6 +467,8 @@ func formatNATPayload(opcode uint8, payload []byte) string {
 		if len(payload) >= 17 {
 			return fmt.Sprintf("reason=0x%02x targetHash=%x", payload[0], payload[1:17])
 		}
+	case OpNatKeepAlive:
+		return fmt.Sprintf("payloadLen=%d", len(payload))
 	}
 	previewLen := len(payload)
 	if previewLen > 64 {

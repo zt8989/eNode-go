@@ -19,6 +19,7 @@ func main() {
 	timeoutFlag := flag.Duration("timeout", 30*time.Second, "wait timeout for NAT sync")
 	registerIntervalFlag := flag.Duration("register-interval", 90*time.Second, "OP_NAT_REGISTER resend interval (0 to disable)")
 	keepaliveIntervalFlag := flag.Duration("keepalive-interval", 20*time.Second, "UDP keepalive interval to NAT server (0 to disable)")
+	keepaliveModeFlag := flag.String("keepalive-mode", "legacy", "keepalive mode: legacy|nat")
 	pingAfterSyncFlag := flag.Bool("ping-after-sync", true, "send UDP PING to peer after OP_NAT_SYNC")
 	exitAfterPongFlag := flag.Bool("exit-after-pong", false, "exit after responding to a single PING")
 	flag.Parse()
@@ -36,6 +37,10 @@ func main() {
 	natAddr, err := net.ResolveUDPAddr("udp", *natAddrFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid -nat: %v\n", err)
+		os.Exit(2)
+	}
+	if *keepaliveModeFlag != "legacy" && *keepaliveModeFlag != "nat" {
+		fmt.Fprintf(os.Stderr, "invalid -keepalive-mode: %q (use legacy|nat)\n", *keepaliveModeFlag)
 		os.Exit(2)
 	}
 
@@ -68,7 +73,7 @@ func main() {
 			go registerLoop(conn, endpointStore, natAddr, hash, *registerIntervalFlag)
 		}
 		if *keepaliveIntervalFlag > 0 {
-			go keepaliveLoop(conn, endpointStore, natAddr, *keepaliveIntervalFlag)
+			go keepaliveLoop(conn, endpointStore, natAddr, *keepaliveIntervalFlag, *keepaliveModeFlag)
 		}
 	case <-time.After(*timeoutFlag):
 		log.Printf("natsim1: timeout waiting for OP_NAT_REGISTER ack")
@@ -183,10 +188,13 @@ func registerLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, natAdd
 	}
 }
 
-func keepaliveLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, natAddr *net.UDPAddr, interval time.Duration) {
+func keepaliveLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, natAddr *net.UDPAddr, interval time.Duration, mode string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	payload := []byte("KA")
+	payload := []byte{0x00}
+	if mode == "nat" {
+		payload = natsim.EncodeNATPacket(ed2k.OpNatKeepAlive, nil)
+	}
 	for {
 		<-ticker.C
 		target := endpointStore.GetOr(natAddr)
@@ -195,6 +203,6 @@ func keepaliveLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, natAd
 			log.Printf("natsim1: keepalive error: %v", err)
 			continue
 		}
-		log.Printf("natsim1: send keepalive -> %s raw=%s", target.String(), natsim.HexDump(payload))
+		log.Printf("natsim1: send keepalive mode=%s -> %s raw=%s", mode, target.String(), natsim.HexDump(payload))
 	}
 }

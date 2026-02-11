@@ -173,6 +173,8 @@ func opcodeName(op uint8, dir string) string {
 		return "OP_NATREGISTER(0xe4)"
 	case OpNatFailed:
 		return "OP_NATFAILED(0xe5)"
+	case OpNatKeepAlive:
+		return "OP_NATKEEPALIVE(0xe6)"
 	case OpNatReping:
 		return "OP_NATREPING(0xe8)"
 	case OpNatSync2:
