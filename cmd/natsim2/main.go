@@ -124,48 +124,40 @@ func readLoop(conn *net.UDPConn, registerAckCh chan<- *net.UDPAddr, syncCh chan<
 		if n == 0 {
 			continue
 		}
-		if buf[0] == ed2k.PrNat {
-			opcode, payload, ok := natsim.DecodeNATPacket(buf[:n])
-			if !ok {
-				continue
-			}
-			switch opcode {
-			case ed2k.OpNatRegister:
-				if len(payload) >= 6 {
-					port := int(payload[0])<<8 | int(payload[1])
-					ip := net.IPv4(payload[2], payload[3], payload[4], payload[5])
-					log.Printf("natsim2: recv OP_NAT_REGISTER server=%s:%d raw=%s", ip.String(), port, natsim.HexDump(buf[:n]))
-					endpoint := &net.UDPAddr{IP: append(net.IP(nil), ip...), Port: port}
+		if n > 0 && buf[0] == ed2k.PrNat {
+			natsim.DispatchNATPacket(
+				buf[:n],
+				func(endpoint *net.UDPAddr, _ []byte) {
+					log.Printf("natsim2: recv OP_NAT_REGISTER server=%s raw=%s", endpoint.String(), natsim.HexDump(buf[:n]))
 					select {
 					case registerAckCh <- endpoint:
 					default:
 					}
-				}
-			case ed2k.OpNatSync:
-				if info, ok := natsim.DecodeSyncPayload(payload); ok {
+				},
+				func(info natsim.SyncInfo, _ []byte) {
 					log.Printf("natsim2: recv OP_NAT_SYNC raw=%s", natsim.HexDump(buf[:n]))
 					select {
 					case syncCh <- info:
 					default:
 					}
-				}
-			case ed2k.OpNatFailed:
-				log.Printf("natsim2: recv OP_NAT_FAILED raw=%s", natsim.HexDump(buf[:n]))
-			}
+				},
+				func(_ []byte) {
+					log.Printf("natsim2: recv OP_NAT_FAILED raw=%s", natsim.HexDump(buf[:n]))
+				},
+			)
 			continue
 		}
 
-		if n == 4 && string(buf[:n]) == "PONG" {
+		if natsim.IsPong(buf[:n]) {
 			log.Printf("natsim2: recv PONG from %s raw=%s", remote.String(), natsim.HexDump(buf[:n]))
 			select {
 			case pongCh <- remote:
 			default:
 			}
-		} else if n == 4 && string(buf[:n]) == "PING" {
+		} else if natsim.IsPing(buf[:n]) {
 			log.Printf("natsim2: recv PING from %s raw=%s", remote.String(), natsim.HexDump(buf[:n]))
-			out := []byte("PONG")
-			_, _ = conn.WriteToUDP(out, remote)
-			log.Printf("natsim2: sent PONG to %s raw=%s", remote.String(), natsim.HexDump(out))
+			_ = natsim.SendPong(conn, remote)
+			log.Printf("natsim2: sent PONG to %s raw=%s", remote.String(), natsim.HexDump([]byte("PONG")))
 		} else {
 			log.Printf("natsim2: recv raw len=%d from %s raw=%s", n, remote.String(), natsim.HexDump(buf[:n]))
 		}

@@ -47,6 +47,7 @@ func main() {
 	defer conn.Close()
 
 	log.Printf("natsim1: local=%s nat=%s hash=%x", conn.LocalAddr().String(), natAddr.String(), hash)
+	endpointStore := natsim.NewEndpointStore(natAddr)
 
 	register := natsim.EncodeNATPacket(ed2k.OpNatRegister, hash[:])
 	log.Printf("natsim1: send OP_NAT_REGISTER -> %s raw=%s", natAddr.String(), natsim.HexDump(register))
@@ -58,16 +59,16 @@ func main() {
 	registerAckCh := make(chan struct{}, 1)
 	syncCh := make(chan natsim.SyncInfo, 1)
 	pongDone := make(chan struct{}, 1)
-	go readLoop(conn, registerAckCh, syncCh, pongDone, *exitAfterPongFlag)
+	go readLoop(conn, endpointStore, registerAckCh, syncCh, pongDone, *exitAfterPongFlag)
 
 	select {
 	case <-registerAckCh:
 		log.Printf("natsim1: got OP_NAT_REGISTER ack, ready for NAT sync and PING")
 		if *registerIntervalFlag > 0 {
-			go registerLoop(conn, natAddr, hash, *registerIntervalFlag)
+			go registerLoop(conn, endpointStore, natAddr, hash, *registerIntervalFlag)
 		}
 		if *keepaliveIntervalFlag > 0 {
-			go keepaliveLoop(conn, natAddr, *keepaliveIntervalFlag)
+			go keepaliveLoop(conn, endpointStore, natAddr, *keepaliveIntervalFlag)
 		}
 	case <-time.After(*timeoutFlag):
 		log.Printf("natsim1: timeout waiting for OP_NAT_REGISTER ack")
@@ -101,7 +102,7 @@ func main() {
 	select {}
 }
 
-func readLoop(conn *net.UDPConn, registerAckCh chan<- struct{}, syncCh chan<- natsim.SyncInfo, pongDone chan<- struct{}, exitAfterPong bool) {
+func readLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, registerAckCh chan<- struct{}, syncCh chan<- natsim.SyncInfo, pongDone chan<- struct{}, exitAfterPong bool) {
 	buf := make([]byte, 2048)
 	registered := false
 	for {
@@ -113,17 +114,12 @@ func readLoop(conn *net.UDPConn, registerAckCh chan<- struct{}, syncCh chan<- na
 		if n == 0 {
 			continue
 		}
-		if buf[0] == ed2k.PrNat {
-			opcode, payload, ok := natsim.DecodeNATPacket(buf[:n])
-			if !ok {
-				continue
-			}
-			switch opcode {
-			case ed2k.OpNatRegister:
-				if len(payload) >= 6 {
-					port := int(payload[0])<<8 | int(payload[1])
-					ip := net.IPv4(payload[2], payload[3], payload[4], payload[5])
-					log.Printf("natsim1: recv OP_NAT_REGISTER server=%s:%d raw=%s", ip.String(), port, natsim.HexDump(buf[:n]))
+		if n > 0 && buf[0] == ed2k.PrNat {
+			natsim.DispatchNATPacket(
+				buf[:n],
+				func(endpoint *net.UDPAddr, _ []byte) {
+					log.Printf("natsim1: recv OP_NAT_REGISTER server=%s raw=%s", endpoint.String(), natsim.HexDump(buf[:n]))
+					endpointStore.Set(endpoint)
 					if !registered {
 						registered = true
 						select {
@@ -131,20 +127,20 @@ func readLoop(conn *net.UDPConn, registerAckCh chan<- struct{}, syncCh chan<- na
 						default:
 						}
 					}
-				}
-			case ed2k.OpNatSync:
-				if !registered {
-					log.Printf("natsim1: ignore OP_NAT_SYNC before register ack")
-					break
-				}
-				if info, ok := natsim.DecodeSyncPayload(payload); ok {
+				},
+				func(info natsim.SyncInfo, _ []byte) {
+					if !registered {
+						log.Printf("natsim1: ignore OP_NAT_SYNC before register ack")
+						return
+					}
 					log.Printf("natsim1: recv OP_NAT_SYNC raw=%s", natsim.HexDump(buf[:n]))
 					select {
 					case syncCh <- info:
 					default:
 					}
-				}
-			}
+				},
+				nil,
+			)
 			continue
 		}
 
@@ -152,11 +148,10 @@ func readLoop(conn *net.UDPConn, registerAckCh chan<- struct{}, syncCh chan<- na
 			log.Printf("natsim1: ignore non-NAT before register ack len=%d from %s", n, remote.String())
 			continue
 		}
-		if n == 4 && string(buf[:n]) == "PING" {
+		if natsim.IsPing(buf[:n]) {
 			log.Printf("natsim1: recv PING from %s raw=%s", remote.String(), natsim.HexDump(buf[:n]))
-			out := []byte("PONG")
-			_, _ = conn.WriteToUDP(out, remote)
-			log.Printf("natsim1: sent PONG to %s raw=%s", remote.String(), natsim.HexDump(out))
+			_ = natsim.SendPong(conn, remote)
+			log.Printf("natsim1: sent PONG to %s raw=%s", remote.String(), natsim.HexDump([]byte("PONG")))
 			if exitAfterPong {
 				select {
 				case pongDone <- struct{}{}:
@@ -164,7 +159,7 @@ func readLoop(conn *net.UDPConn, registerAckCh chan<- struct{}, syncCh chan<- na
 				}
 				return
 			}
-		} else if n == 4 && string(buf[:n]) == "PONG" {
+		} else if natsim.IsPong(buf[:n]) {
 			log.Printf("natsim1: recv PONG from %s raw=%s", remote.String(), natsim.HexDump(buf[:n]))
 		} else {
 			log.Printf("natsim1: recv raw len=%d from %s raw=%s", n, remote.String(), natsim.HexDump(buf[:n]))
@@ -172,32 +167,34 @@ func readLoop(conn *net.UDPConn, registerAckCh chan<- struct{}, syncCh chan<- na
 	}
 }
 
-func registerLoop(conn *net.UDPConn, natAddr *net.UDPAddr, hash [16]byte, interval time.Duration) {
+func registerLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, natAddr *net.UDPAddr, hash [16]byte, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		<-ticker.C
+		target := endpointStore.GetOr(natAddr)
 		packet := natsim.EncodeNATPacket(ed2k.OpNatRegister, hash[:])
-		_, err := conn.WriteToUDP(packet, natAddr)
+		_, err := conn.WriteToUDP(packet, target)
 		if err != nil {
 			log.Printf("natsim1: register resend error: %v", err)
 			continue
 		}
-		log.Printf("natsim1: resend OP_NAT_REGISTER -> %s raw=%s", natAddr.String(), natsim.HexDump(packet))
+		log.Printf("natsim1: resend OP_NAT_REGISTER -> %s raw=%s", target.String(), natsim.HexDump(packet))
 	}
 }
 
-func keepaliveLoop(conn *net.UDPConn, natAddr *net.UDPAddr, interval time.Duration) {
+func keepaliveLoop(conn *net.UDPConn, endpointStore *natsim.EndpointStore, natAddr *net.UDPAddr, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	payload := []byte("KA")
 	for {
 		<-ticker.C
-		_, err := conn.WriteToUDP(payload, natAddr)
+		target := endpointStore.GetOr(natAddr)
+		_, err := conn.WriteToUDP(payload, target)
 		if err != nil {
 			log.Printf("natsim1: keepalive error: %v", err)
 			continue
 		}
-		log.Printf("natsim1: send keepalive -> %s raw=%s", natAddr.String(), natsim.HexDump(payload))
+		log.Printf("natsim1: send keepalive -> %s raw=%s", target.String(), natsim.HexDump(payload))
 	}
 }
