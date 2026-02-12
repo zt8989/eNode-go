@@ -41,7 +41,10 @@ func (u *UDPCrypt) Decrypt(buffer []byte) []byte {
 	if err != nil {
 		return buffer
 	}
-	if IsProtocol(protocol) {
+	// For server UDP packets, plaintext starts with PR_ED2K.
+	// Obfuscated marker byte can legally collide with other protocol constants
+	// (e.g. PR_EMULE/PR_ZLIB), so only PR_ED2K should bypass decryption here.
+	if protocol == PrED2K {
 		b.Pos(0)
 		return b.Bytes()
 	}

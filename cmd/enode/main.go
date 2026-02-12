@@ -2,33 +2,56 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
-	"net"
+	"os"
+	"os/exec"
+	"time"
 
 	"enode/config"
 	"enode/ed2k"
+	"enode/logging"
 	"enode/storage"
 )
 
+const backgroundEnvKey = "ENODE_BACKGROUND"
+
 func main() {
 	configPath := flag.String("config", "enode.config.yaml", "path to YAML config")
+	daemon := flag.Bool("daemon", false, "run in background")
 	flag.Parse()
+
+	if *daemon && os.Getenv(backgroundEnvKey) != "1" {
+		pid, err := startBackgroundProcess(filterDaemonArgs(os.Args[1:]))
+		if err != nil {
+			log.Fatalf("start background process failed: %v", err)
+		}
+		log.Printf("enode started in background, pid=%d", pid)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("config load failed: %v", err)
 	}
+	if err := logging.SetOutputFile(cfg.LogFile); err != nil {
+		log.Fatalf("config logFile invalid: %v", err)
+	}
+	if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
+		log.Fatalf("config logLevel invalid: %v", err)
+	}
+	logging.Infof("welcome: enode starting (config=%s)", *configPath)
 
 	engine, err := storage.NewEngine(cfg.StorageEngineConfig())
 	if err != nil {
-		log.Fatalf("storage engine create failed: %v", err)
+		logging.Fatalf("storage engine create failed: %v", err)
 	}
 	if err := engine.Init(); err != nil {
-		log.Fatalf("storage init failed: %v", err)
+		logging.Fatalf("storage init failed: %v", err)
 	}
 	defer func() {
 		if err := engine.Close(); err != nil {
-			log.Printf("storage close error: %v", err)
+			logging.Warnf("storage close error: %v", err)
 		}
 	}()
 
@@ -49,18 +72,87 @@ func main() {
 		GetFiles:     cfg.UDP.GetFiles,
 		SupportCrypt: cfg.SupportCrypt,
 	}
+	tcpFlags := ed2k.BuildTCPFlags(tcpCfg)
+	udpFlags := ed2k.BuildUDPFlags(udpCfg)
+	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", cfg.Address, cfg.TCP.Port)))
 
-	ln, err := ed2k.RunTCPServer(tcpCfg, func(_ net.Conn) {})
+	runtime := ed2k.NewServerRuntime(
+		ed2k.TCPRuntimeConfig{
+			Name:              cfg.Name,
+			Description:       cfg.Description,
+			Address:           cfg.Address,
+			Port:              cfg.TCP.Port,
+			Flags:             tcpFlags,
+			Hash:              serverHash,
+			MessageLogin:      cfg.MessageLogin,
+			MessageLowID:      cfg.MessageLowID,
+			ConnectionTimeout: time.Duration(cfg.TCP.ConnectionTimeout) * time.Millisecond,
+			DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
+			AllowLowIDs:       cfg.TCP.AllowLowIDs,
+			SupportCrypt:      cfg.SupportCrypt,
+		},
+		ed2k.UDPRuntimeConfig{
+			Name:           cfg.Name,
+			Description:    cfg.Description,
+			DynIP:          cfg.DynIP,
+			UDPFlags:       udpFlags,
+			UDPPortObf:     cfg.UDP.PortObfuscated,
+			TCPPortObf:     cfg.TCP.PortObfuscated,
+			UDPServerKey:   cfg.UDP.ServerKey,
+			MaxConnections: uint32(cfg.TCP.MaxConnections),
+		},
+		engine,
+	)
+
+	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(false))
 	if err != nil {
-		log.Fatalf("tcp server failed: %v", err)
+		logging.Fatalf("tcp server failed: %v", err)
 	}
 	defer ln.Close()
+	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
 
-	udpConn, err := ed2k.RunUDPServer(udpCfg, func([]byte, *net.UDPAddr, *net.UDPConn) {})
+	udpMainHandler := runtime.UDPHandler(false)
+	if cfg.NAT.Enabled {
+		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
+		natHandler := ed2k.NewNATTraversalHandler(natTTL)
+		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.UDP.Port)
+		if cfg.SupportCrypt && cfg.UDP.PortObfuscated != 0 {
+			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortObfuscated, cfg.UDP.PortObfuscated)
+		}
+		runtime.SetNATHandler(natHandler)
+		effectiveIP := cfg.DynIP
+		if effectiveIP == "" {
+			effectiveIP = cfg.Address
+		}
+		if effectiveIP == "" || effectiveIP == "0.0.0.0" {
+			logging.Warnf("nat register endpoint unresolved: dynIp=%q address=%q, clients may receive serverIP=0.0.0.0", cfg.DynIP, cfg.Address)
+		}
+		cleanupInterval := natTTL / 2
+		if cleanupInterval < 5*time.Second {
+			cleanupInterval = 5 * time.Second
+		} else if cleanupInterval > time.Minute {
+			cleanupInterval = time.Minute
+		}
+		stopCleanup := natHandler.StartCleanup(cleanupInterval)
+		defer stopCleanup()
+
+		natConn, err := ed2k.RunUDPServer(ed2k.UDPServerConfig{
+			Address: cfg.Address,
+			Port:    cfg.NAT.Port,
+		}, udpMainHandler)
+		if err != nil {
+			logging.Fatalf("nat traversal udp server failed: %v", err)
+		}
+		defer natConn.Close()
+		logging.Infof("listening: nat-udp %s:%d", cfg.Address, cfg.NAT.Port)
+	}
+
+	udpConn, err := ed2k.RunUDPServer(udpCfg, udpMainHandler)
 	if err != nil {
-		log.Fatalf("udp server failed: %v", err)
+		logging.Fatalf("udp server failed: %v", err)
 	}
 	defer udpConn.Close()
+	logging.Infof("listening: udp %s:%d", udpCfg.Address, udpCfg.Port)
 
 	if cfg.SupportCrypt {
 		tcpCryptCfg := tcpCfg
@@ -68,18 +160,62 @@ func main() {
 		udpCryptCfg := udpCfg
 		udpCryptCfg.Port = cfg.UDP.PortObfuscated
 
-		lnCrypt, err := ed2k.RunTCPServer(tcpCryptCfg, func(_ net.Conn) {})
+		lnCrypt, err := ed2k.RunTCPServer(tcpCryptCfg, runtime.TCPHandler(true))
 		if err != nil {
-			log.Fatalf("obfuscated tcp server failed: %v", err)
+			logging.Fatalf("obfuscated tcp server failed: %v", err)
 		}
 		defer lnCrypt.Close()
+		logging.Infof("listening: tcp-obfuscated %s:%d", tcpCryptCfg.Address, tcpCryptCfg.Port)
 
-		udpConnCrypt, err := ed2k.RunUDPServer(udpCryptCfg, func([]byte, *net.UDPAddr, *net.UDPConn) {})
+		udpConnCrypt, err := ed2k.RunUDPServer(udpCryptCfg, runtime.UDPHandler(true))
 		if err != nil {
-			log.Fatalf("obfuscated udp server failed: %v", err)
+			logging.Fatalf("obfuscated udp server failed: %v", err)
 		}
 		defer udpConnCrypt.Close()
+		logging.Infof("listening: udp-obfuscated %s:%d", udpCryptCfg.Address, udpCryptCfg.Port)
 	}
 
 	select {}
+}
+
+func startBackgroundProcess(args []string) (int, error) {
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), backgroundEnvKey+"=1")
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer devNull.Close()
+
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+
+	return cmd.Process.Pid, nil
+}
+
+func filterDaemonArgs(args []string) []string {
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-daemon" {
+			continue
+		}
+		if arg == "--daemon" {
+			continue
+		}
+		if arg == "-daemon=true" || arg == "--daemon=true" {
+			continue
+		}
+		if arg == "-daemon=false" || arg == "--daemon=false" {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
 }

@@ -17,6 +17,8 @@ type Config struct {
 	MessageLowID string `yaml:"messageLowID"`
 	MessageLogin string `yaml:"messageLogin"`
 	NoAssert     bool   `yaml:"noAssert"`
+	LogLevel     string `yaml:"logLevel"`
+	LogFile      string `yaml:"logFile"`
 
 	SupportCrypt bool `yaml:"supportCrypt"`
 	RequestCrypt bool `yaml:"requestCrypt"`
@@ -26,6 +28,7 @@ type Config struct {
 
 	TCP TCPConfig `yaml:"tcp"`
 	UDP UDPConfig `yaml:"udp"`
+	NAT NATConfig `yaml:"natTraversal"`
 
 	Storage StorageConfig `yaml:"storage"`
 }
@@ -35,6 +38,7 @@ type TCPConfig struct {
 	PortObfuscated    uint16 `yaml:"portObfuscated"`
 	MaxConnections    int    `yaml:"maxConnections"`
 	ConnectionTimeout int    `yaml:"connectionTimeout"`
+	DisconnectTimeout int    `yaml:"disconnectTimeout"`
 	AllowLowIDs       bool   `yaml:"allowLowIDs"`
 	MinLowID          uint32 `yaml:"minLowID"`
 	MaxLowID          uint32 `yaml:"maxLowID"`
@@ -46,6 +50,12 @@ type UDPConfig struct {
 	GetSources     bool   `yaml:"getSources"`
 	GetFiles       bool   `yaml:"getFiles"`
 	ServerKey      uint32 `yaml:"serverKey"`
+}
+
+type NATConfig struct {
+	Enabled                bool   `yaml:"enabled"`
+	Port                   uint16 `yaml:"port"`
+	RegistrationTTLSeconds int    `yaml:"registrationTTLSeconds"`
 }
 
 type StorageConfig struct {
@@ -88,17 +98,32 @@ func setDefaults(cfg *Config) {
 	if cfg.Address == "" {
 		cfg.Address = "0.0.0.0"
 	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	if cfg.LogFile == "" {
+		cfg.LogFile = "logs/enode.log"
+	}
 	if cfg.TCP.Port == 0 {
 		cfg.TCP.Port = 4661
 	}
 	if cfg.TCP.PortObfuscated == 0 {
 		cfg.TCP.PortObfuscated = 4662
 	}
+	if cfg.TCP.DisconnectTimeout <= 0 {
+		cfg.TCP.DisconnectTimeout = 3600
+	}
 	if cfg.UDP.Port == 0 {
 		cfg.UDP.Port = 4665
 	}
 	if cfg.UDP.PortObfuscated == 0 {
 		cfg.UDP.PortObfuscated = 4666
+	}
+	if cfg.NAT.Port == 0 {
+		cfg.NAT.Port = 2004
+	}
+	if cfg.NAT.RegistrationTTLSeconds <= 0 {
+		cfg.NAT.RegistrationTTLSeconds = 30
 	}
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"

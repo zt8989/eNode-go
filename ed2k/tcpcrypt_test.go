@@ -21,7 +21,8 @@ func TestTCPCryptNegotiateAndHandshake(t *testing.T) {
 	aBuf := make([]byte, CryptPrimeSize)
 	copy(aBuf[CryptPrimeSize-len(A):], A)
 
-	negIn := append(append([]byte{}, aBuf...), 0x00) // pad len = 0
+	negIn := append([]byte{0x7a}, aBuf...) // random non-protocol marker
+	negIn = append(negIn, 0x00)            // pad len = 0
 	resp, err := tc.ProcessData(NewBufferFromBytes(negIn))
 	if err != nil {
 		t.Fatal(err)

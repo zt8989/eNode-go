@@ -3,6 +3,8 @@ package ed2k
 import (
 	"net"
 	"strconv"
+
+	"enode/logging"
 )
 
 type TCPServerConfig struct {
@@ -48,7 +50,10 @@ func RunTCPServer(cfg TCPServerConfig, handler func(net.Conn)) (net.Listener, er
 			if err != nil {
 				return
 			}
-			go handler(conn)
+			go func() {
+				logging.Debugf("tcp accept remote=%s local=%s", conn.RemoteAddr(), conn.LocalAddr())
+				handler(conn)
+			}()
 		}
 	}()
 	return ln, nil

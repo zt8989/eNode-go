@@ -8,8 +8,10 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
   - `PR_ED2K (0xe3)`: normal eD2K packets
   - `PR_ZLIB (0xd4)`: compressed payloads
   - `PR_EMULE (0xc5)`: eMule-specific protocol family
+  - `PR_NAT (0xf1)`: NAT traversal UDP protocol family
 - TCP packet format (simplified): `protocol(1) + size(4) + opcode(1) + payload`
 - UDP packet format (simplified): `protocol(1) + opcode(1) + payload`
+- NAT UDP packet format: `protocol(1) + size(4, little-endian) + opcode(1) + payload`
 
 ## TCP OP Codes
 
@@ -30,7 +32,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SERVERLIST` | `0x32` | Server -> Client | Response with known servers. |
 | `OP_SERVERIDENT` | `0x41` | Server -> Client | Server identity/tags response. |
 | `OP_FOUNDSOURCES` | `0x42` | Server -> Client | Source list for requested file. |
-| `OP_FOUNDSOURCES_OBFU` | `0x44` | Server -> Client | Obfuscated found-sources variant (reserved/not fully wired). |
+| `OP_FOUNDSOURCES_OBFU` | `0x44` | Server -> Client | Obfuscated found-sources response (adds per-source obfuscation settings byte). |
 | `OP_SEARCHRESULT` | `0x33` | Server -> Client | Search results list. |
 | `OP_CALLBACKREQUESTED` | `0x35` | Server -> LowID client | Notify LowID client to connect back. |
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
@@ -50,9 +52,74 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SERVERDESCRES` | `0xa3` | Server -> Client | UDP server description response. |
 | `OP_GLOBSEARCHRES` | `0x99` | Server -> Client | UDP search results response. |
 
+## NAT Traversal UDP OP Codes (`PR_NAT = 0xf1`)
+
+| OP constant | Hex | Direction | Meaning |
+|---|---:|---|---|
+| `OP_NAT_REGISTER` | `0xe4` | Client -> NAT Server | Register/refresh client hash and observed endpoint. |
+| `OP_NAT_REGISTER` | `0xe4` | NAT Server -> Client | Register ACK with server endpoint (`port(2, BE) + ip(4, BE)`). |
+| `OP_NAT_SYNC2` | `0xe9` | Client -> NAT Server | Ask server to pair source hash with target hash (`srcHash(16)+connAck(4)+dstHash(16)`). |
+| `OP_NAT_SYNC` | `0xe1` | NAT Server -> Client | Peer endpoint exchange (`peerIP(4, BE)+peerPort(2, BE)+peerHash(16)+connAck(4)`). |
+| `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered). |
+| `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen` for registered endpoint. |
+| keepalive (non-`PR_NAT`, legacy) | n/a | Client -> NAT Server | Legacy raw 1-byte UDP heartbeat without NAT header; still accepted for compatibility. |
+
+## Payload Data Format
+
+### Encoding Conventions
+
+| Item | Format |
+|---|---|
+| Integer endian | Little-endian unless explicitly noted |
+| `hash16` | Fixed 16-byte client/file hash |
+| `string` | `uint16 length + bytes` |
+| `tags` | `uint32 count`, then repeated tag entries (see `ed2k/buffer.go`) |
+| `source entry` | `clientID(uint32) + clientPort(uint16)` |
+
+### TCP Payloads (Implemented Here)
+
+| OP | Direction | Payload Format |
+|---|---|---|
+| `OP_LOGINREQUEST` | Client -> Server (parsed) | `hash16 + clientID(uint32) + clientPort(uint16) + tags` |
+| `OP_SERVERMESSAGE` | Server -> Client | `message(string)` |
+| `OP_SERVERSTATUS` | Server -> Client | `clients(uint32) + files(uint32)` |
+| `OP_IDCHANGE` | Server -> Client | `clientID(uint32) + tcpFlags(uint32)` |
+| `OP_SERVERLIST` | Server -> Client | `serverCount(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` |
+| `OP_SERVERIDENT` | Server -> Client | `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags` |
+| `OP_FOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
+| `OP_FOUNDSOURCES_OBFU` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry + obfSettings(uint8) [+ userHash(hash16) if obfSettings&0x80])` |
+| `OP_SEARCHRESULT` | Server -> Client | `resultCount(uint32) + repeated(fileRecord)`; `fileRecord = fileHash(hash16) + sourceID(uint32) + sourcePort(uint16) + tags` |
+| `OP_CALLBACKREQUESTED` | Server -> LowID Client | `targetIP(uint32) + targetPort(uint16)` |
+| `OP_CALLBACKFAILED` | Server -> Client | Empty payload |
+
+### UDP Payloads (Implemented Here)
+
+| OP | Direction | Payload Format |
+|---|---|---|
+| `OP_GLOBFOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
+| `OP_GLOBSEARCHRES` | Server -> Client | One file per UDP packet: `fileRecord = fileHash + sourceID + sourcePort + tags` |
+| `OP_GLOBSERVSTATRES` | Server -> Client | `challenge(uint32) + users(uint32) + files(uint32) + maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32) + udpFlags(uint32) + lowIDUsers(uint32) + udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32)` |
+| `OP_SERVERDESCRES` (old) | Server -> Client | `name(string) + description(string)` |
+| `OP_SERVERDESCRES` (extended) | Server -> Client | `challenge(uint32) + tags` |
+
+### NAT Payloads (`PR_NAT`)
+
+| Item | Format / Note |
+|---|---|
+| NAT envelope | `protocol(1) + size(4, little-endian) + opcode(1) + payload` |
+| NAT endian note | Envelope `size` is little-endian; `peerIP/peerPort` and register ACK endpoint fields are big-endian |
+| `OP_NAT_REGISTER` (client -> server) | `userHash(hash16)` or `userHash(hash16) + stats(3 * uint16)` |
+| `OP_NAT_REGISTER` (server -> client) | `serverPort(uint16, BE) + serverIP(uint32, BE)` |
+| `OP_NAT_SYNC2` | `srcHash(hash16) + connAck(uint32) + dstHash(hash16)` |
+| `OP_NAT_SYNC` | `peerIP(uint32, BE) + peerPort(uint16, BE) + peerHash(hash16) + connAck(uint32)` |
+| `OP_NAT_FAILED` | `reason(uint8) + targetHash(hash16)` (implemented reason: `0x01`) |
+| `OP_NAT_KEEPALIVE` | Empty payload (`payloadLen=0`) |
+| legacy keepalive (non-`PR_NAT`) | Raw single-byte UDP packet (no NAT envelope/opcode) |
+
 ## Notes
 
 - Exact field encoding for each payload is implemented in:
   - `ed2k/tcpoperations.go`
   - `ed2k/udpoperations.go`
   - `ed2k/packet.go`
+  - `ed2k/nattraversal.go`

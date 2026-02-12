@@ -35,6 +35,12 @@ storage:
 	if cfg.TCP.Port != 5555 || cfg.UDP.Port != 5559 {
 		t.Fatalf("bad ports: %+v", cfg)
 	}
+	if cfg.LogLevel != "info" || cfg.LogFile != "logs/enode.log" {
+		t.Fatalf("bad log defaults: level=%q file=%q", cfg.LogLevel, cfg.LogFile)
+	}
+	if cfg.NAT.Port != 2004 || cfg.NAT.RegistrationTTLSeconds != 30 {
+		t.Fatalf("bad nat defaults: %+v", cfg.NAT)
+	}
 	s := cfg.StorageEngineConfig()
 	if s.Engine != "mysql" || s.MySQL.Database != "enode" {
 		t.Fatalf("bad storage config: %+v", s)

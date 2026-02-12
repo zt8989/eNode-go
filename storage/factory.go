@@ -20,6 +20,7 @@ type Engine interface {
 	GetSources([]byte, uint64) []Source
 	GetSourcesByHash([]byte) []Source
 	FindByNameContains(string) []File
+	FindBySearch(*SearchExpr) []File
 	ServersCount() int
 	AddServer(Server)
 	ServersAll() []Server

@@ -3,7 +3,8 @@ package storage
 import (
 	"context"
 	"errors"
-	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -75,6 +76,20 @@ func (m *MongoDBEngine) Init() error {
 	_, _ = db.Collection("sources").Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}, {Key: "client_ed2k", Value: 1}},
 		Options: options.Index().SetUnique(true),
+	})
+	_, _ = db.Collection("sources").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}}},
+		{Keys: bson.D{{Key: "name", Value: "text"}}},
+		{Keys: bson.D{{Key: "type", Value: 1}}},
+		{Keys: bson.D{{Key: "ext", Value: 1}}},
+		{Keys: bson.D{{Key: "codec", Value: 1}}},
+		{Keys: bson.D{{Key: "bitrate", Value: 1}}},
+		{Keys: bson.D{{Key: "length", Value: 1}}},
+		{Keys: bson.D{{Key: "file_size", Value: 1}}},
+	})
+	_, _ = db.Collection("files").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "sources", Value: 1}}},
+		{Keys: bson.D{{Key: "completed", Value: 1}}},
 	})
 	return nil
 }
@@ -275,9 +290,10 @@ func (m *MongoDBEngine) GetSourcesByHash(fileHash []byte) []Source {
 		var cdoc struct {
 			IDEd2K uint32 `bson:"id_ed2k"`
 			Port   uint16 `bson:"port"`
+			Hash   []byte `bson:"hash"`
 		}
 		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K}).Decode(&cdoc); err == nil {
-			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port})
+			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port, UserHash: append([]byte(nil), cdoc.Hash...)})
 		}
 	}
 	return out
@@ -304,9 +320,10 @@ func (m *MongoDBEngine) getSourcesByFile(ctx context.Context, fileHash []byte, f
 		var cdoc struct {
 			IDEd2K uint32 `bson:"id_ed2k"`
 			Port   uint16 `bson:"port"`
+			Hash   []byte `bson:"hash"`
 		}
 		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K}).Decode(&cdoc); err == nil {
-			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port})
+			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port, UserHash: append([]byte(nil), cdoc.Hash...)})
 		}
 	}
 	return out
@@ -320,8 +337,11 @@ func (m *MongoDBEngine) FindByNameContains(term string) []File {
 	defer cancel()
 	cur, err := m.db.Collection("sources").Find(
 		ctx,
-		bson.M{"name": bson.M{"$regex": fmt.Sprintf(".*%s.*", term)}},
-		options.Find().SetLimit(255),
+		bson.M{"$text": bson.M{"$search": term}},
+		options.Find().
+			SetLimit(255).
+			SetProjection(bson.M{"score": bson.M{"$meta": "textScore"}}).
+			SetSort(bson.D{{Key: "score", Value: bson.M{"$meta": "textScore"}}}),
 	)
 	if err != nil {
 		return nil
@@ -345,7 +365,7 @@ func (m *MongoDBEngine) FindByNameContains(term string) []File {
 	seen := map[string]bool{}
 	var out []File
 	for _, s := range src {
-		key := string(s.FileHash) + ":" + fmt.Sprintf("%d", s.FileSize)
+		key := string(s.FileHash) + ":" + strconv.FormatUint(s.FileSize, 10)
 		if seen[key] {
 			continue
 		}
@@ -369,6 +389,211 @@ func (m *MongoDBEngine) FindByNameContains(term string) []File {
 		})
 	}
 	return out
+}
+
+func (m *MongoDBEngine) FindBySearch(expr *SearchExpr) []File {
+	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	if expr == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+
+	sourceMatch, ok := mongoSourceConjunctFilter(expr)
+	fullMatch, needsFile, usesText := mongoFilter(expr)
+	if !ok || fullMatch == nil {
+		return nil
+	}
+
+	pipeline := mongo.Pipeline{}
+	if sourceMatch != nil {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: sourceMatch}})
+	}
+	if needsFile {
+		pipeline = append(pipeline,
+			bson.D{{
+				Key: "$lookup", Value: bson.M{
+					"from": "files",
+					"let":  bson.M{"h": "$file_hash", "s": "$file_size"},
+					"pipeline": mongo.Pipeline{
+						bson.D{{Key: "$match", Value: bson.M{
+							"$expr": bson.M{
+								"$and": []bson.M{
+									{"$eq": []any{"$hash", "$$h"}},
+									{"$eq": []any{"$size", "$$s"}},
+								},
+							},
+						}}},
+					},
+					"as": "file",
+				},
+			}},
+			bson.D{{Key: "$unwind", Value: "$file"}},
+		)
+	}
+	pipeline = append(pipeline,
+		bson.D{{Key: "$match", Value: fullMatch}},
+		bson.D{{Key: "$addFields", Value: bson.M{"_textScore": bson.M{"$meta": "textScore"}}}},
+		bson.D{{Key: "$group", Value: bson.M{
+			"_id":         bson.M{"hash": "$file_hash", "size": "$file_size"},
+			"hash":        bson.M{"$first": "$file_hash"},
+			"size":        bson.M{"$first": "$file_size"},
+			"name":        bson.M{"$first": "$name"},
+			"type":        bson.M{"$first": "$type"},
+			"title":       bson.M{"$first": "$title"},
+			"artist":      bson.M{"$first": "$artist"},
+			"album":       bson.M{"$first": "$album"},
+			"runtime":     bson.M{"$first": "$length"},
+			"bitrate":     bson.M{"$first": "$bitrate"},
+			"codec":       bson.M{"$first": "$codec"},
+			"sources":     bson.M{"$first": "$file.sources"},
+			"completed":   bson.M{"$first": "$file.completed"},
+			"source_id":   bson.M{"$first": "$file.source_id"},
+			"source_port": bson.M{"$first": "$file.source_port"},
+			"score":       bson.M{"$first": "$_textScore"},
+		}}},
+	)
+	if usesText {
+		pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.M{"score": -1}}})
+	}
+	pipeline = append(pipeline,
+		bson.D{{Key: "$limit", Value: 255}},
+	)
+
+	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline, options.Aggregate().SetAllowDiskUse(true))
+	if err != nil {
+		return nil
+	}
+	defer cur.Close(ctx)
+
+	var out []File
+	for cur.Next(ctx) {
+		var doc struct {
+			Hash       []byte  `bson:"hash"`
+			Size       uint64  `bson:"size"`
+			Name       string  `bson:"name"`
+			Type       string  `bson:"type"`
+			Title      string  `bson:"title"`
+			Artist     string  `bson:"artist"`
+			Album      string  `bson:"album"`
+			Runtime    uint32  `bson:"runtime"`
+			Bitrate    uint32  `bson:"bitrate"`
+			Codec      string  `bson:"codec"`
+			Sources    uint32  `bson:"sources"`
+			Completed  uint32  `bson:"completed"`
+			SourceID   uint32  `bson:"source_id"`
+			SourcePort uint16  `bson:"source_port"`
+			Score      float64 `bson:"score"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			continue
+		}
+		out = append(out, File{
+			Hash: doc.Hash, Name: doc.Name, Size: doc.Size, Type: doc.Type,
+			Sources: doc.Sources, Completed: doc.Completed, Title: doc.Title, Artist: doc.Artist,
+			Album: doc.Album, Runtime: doc.Runtime, Bitrate: doc.Bitrate, Codec: doc.Codec,
+			SourceID: doc.SourceID, SourcePort: doc.SourcePort,
+		})
+	}
+	return out
+}
+
+func mongoSourceConjunctFilter(expr *SearchExpr) (bson.M, bool) {
+	if expr == nil {
+		return nil, true
+	}
+	switch expr.Kind {
+	case SearchAnd:
+		l, ok := mongoSourceConjunctFilter(expr.Left)
+		if !ok {
+			return nil, false
+		}
+		r, ok := mongoSourceConjunctFilter(expr.Right)
+		if !ok {
+			return nil, false
+		}
+		if l == nil {
+			return r, true
+		}
+		if r == nil {
+			return l, true
+		}
+		return bson.M{"$and": []bson.M{l, r}}, true
+	case SearchOr, SearchAndNot:
+		return nil, false
+	default:
+		f, needsFile, _ := mongoFilter(expr)
+		if f == nil || needsFile {
+			return nil, true
+		}
+		return f, true
+	}
+}
+
+func mongoFilter(expr *SearchExpr) (bson.M, bool, bool) {
+	if expr == nil {
+		return nil, false, false
+	}
+	switch expr.Kind {
+	case SearchText:
+		terms := splitTerms(expr.Text)
+		if len(terms) == 0 {
+			return nil, false, false
+		}
+		return bson.M{"$text": bson.M{"$search": strings.Join(terms, " ")}}, false, true
+	case SearchString:
+		if expr.TagType == searchTypeText {
+			return mongoFilter(&SearchExpr{Kind: SearchText, Text: expr.ValueString})
+		}
+		switch expr.TagType {
+		case searchTypeFileType:
+			return bson.M{"type": expr.ValueString}, false, false
+		case searchTypeExt:
+			return bson.M{"ext": expr.ValueString}, false, false
+		case searchTypeCodec:
+			return bson.M{"codec": expr.ValueString}, false, false
+		default:
+			return nil, false, false
+		}
+	case SearchUInt32, SearchUInt64:
+		val := expr.ValueUint
+		switch expr.TagType {
+		case searchTypeSizeGt:
+			return bson.M{"file_size": bson.M{"$gt": val}}, false, false
+		case searchTypeSizeLt:
+			return bson.M{"file_size": bson.M{"$lt": val}}, false, false
+		case searchTypeSources:
+			return bson.M{"file.sources": bson.M{"$gt": val}}, true, false
+		case searchTypeBitrate:
+			return bson.M{"bitrate": bson.M{"$gt": val}}, false, false
+		case searchTypeDuration:
+			return bson.M{"length": bson.M{"$gt": val}}, false, false
+		case searchTypeComplete:
+			return bson.M{"file.completed": bson.M{"$gt": val}}, true, false
+		default:
+			return nil, false, false
+		}
+	case SearchAnd, SearchOr, SearchAndNot:
+		l, lNeedsFile, lUsesText := mongoFilter(expr.Left)
+		r, rNeedsFile, rUsesText := mongoFilter(expr.Right)
+		if l == nil || r == nil {
+			return nil, false, false
+		}
+		needsFile := lNeedsFile || rNeedsFile
+		usesText := lUsesText || rUsesText
+		switch expr.Kind {
+		case SearchOr:
+			return bson.M{"$or": []bson.M{l, r}}, needsFile, usesText
+		case SearchAndNot:
+			return bson.M{"$and": []bson.M{l, {"$nor": []bson.M{r}}}}, needsFile, usesText
+		default:
+			return bson.M{"$and": []bson.M{l, r}}, needsFile, usesText
+		}
+	default:
+		return nil, false, false
+	}
 }
 
 func (m *MongoDBEngine) ServersCount() int {

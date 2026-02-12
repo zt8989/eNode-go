@@ -32,3 +32,25 @@ func TestUDPCryptDisabled(t *testing.T) {
 		t.Fatalf("encrypt should pass through")
 	}
 }
+
+func TestUDPCryptDecryptMarkerCollisionWithProtocolByte(t *testing.T) {
+	u := NewUDPCrypt(true, 0x55667788)
+	plain := []byte{PrED2K, 0x99, 0x01}
+	randomKey := uint16(0x1122)
+
+	enc := NewBuffer(len(plain) + 5)
+	_ = enc.PutUInt32LE(MagicValueUDPSyncServer)
+	_ = enc.PutUInt8(0)
+	enc.PutBuffer(plain)
+	cipher := RC4Crypt(enc.Bytes(), len(enc.Bytes()), u.rc4Key(MagicValueUDPClientServer, randomKey))
+
+	wire := NewBuffer(3 + len(cipher))
+	_ = wire.PutUInt8(PrEMule) // marker byte collides with known protocol value
+	_ = wire.PutUInt16LE(randomKey)
+	wire.PutBuffer(cipher)
+
+	got := u.Decrypt(wire.Bytes())
+	if string(got) != string(plain) {
+		t.Fatalf("udp decrypt mismatch with marker collision: %v != %v", got, plain)
+	}
+}

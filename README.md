@@ -26,6 +26,7 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - Lugdunum/eMule extended protocol
 - gzip compression
 - LowID callbacks
+- NAT traversal server (`OP_VC_NAT_HEADER`, `OP_NAT_REGISTER`, `OP_NAT_SYNC2`)
 - Files larger than 4 GiB
 - Easy support for multiple storage engines
 
@@ -46,6 +47,11 @@ Important config section:
 ```yaml
 storage:
   engine: memory   # memory | mysql | mongodb
+
+natTraversal:
+  enabled: true
+  port: 2004
+  registrationTTLSeconds: 600
 ```
 
 For MySQL:
@@ -90,12 +96,8 @@ This spins temporary MySQL and MongoDB containers, initializes schema/data, and 
 
 ## To Do
 
-- gzip compression on send
-- `OP_FOUNDSOURCES_OBFU`
-- Send `OP_SERVERSTATUS` every 5 minutes to connected clients
 - Better storage/indexing
 - IPv6 support ([unofficial draft for eD2K IPv6 extension](http://piratenpad.de/p/ed2kIPv6))
-- Support for [NAT traversal](http://en.wikipedia.org/wiki/NAT_traversal)
 
 ## Thanks To
 
