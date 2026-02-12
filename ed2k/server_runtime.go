@@ -92,7 +92,7 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		}
 		if s.NAT != nil {
 			if data[0] == PrNat || len(data) == 1 {
-				s.NAT.HandlePacket(data, remote, conn)
+				s.NAT.HandlePacket(data, remote, conn, crypt)
 				if data[0] == PrNat {
 					return
 				}

@@ -228,6 +228,29 @@ func TestNATRegisterUsesObfuscatedPortByLocalListener(t *testing.T) {
 	}
 }
 
+func TestNATRegisterOnNatPortReturnsPlainUDPPort(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	handler.SetRegisterEndpoint("66.154.127.95", 4665)
+	handler.SetRegisterEndpointForLocalPort(2004, 4665)
+	handler.SetRegisterEndpointForLocalPort(5559, 5559)
+
+	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	hash := bytes.Repeat([]byte{0x7a}, 16)
+
+	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004)
+	if len(outs) != 1 {
+		t.Fatalf("responses len=%d", len(outs))
+	}
+	_, payload, ok := decodeNATPacket(outs[0].packet)
+	if !ok || len(payload) != 6 {
+		t.Fatalf("bad register ack")
+	}
+	gotPort := binary.BigEndian.Uint16(payload[0:2])
+	if gotPort != 4665 {
+		t.Fatalf("port=%d want=4665", gotPort)
+	}
+}
+
 func TestNATEntriesSharedAcrossAllListenerPorts(t *testing.T) {
 	handler := NewNATTraversalHandler(time.Minute)
 	handler.SetRegisterEndpoint("66.154.127.95", 2004)

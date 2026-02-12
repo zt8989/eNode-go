@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"enode/logging"
 )
 
 const defaultDynIPResolveTimeout = 3 * time.Second
@@ -20,9 +22,11 @@ func resolveDynIPValue(dynIP string, testURLs []string, timeout time.Duration) (
 }
 
 func fetchPublicIPv4(testURLs []string, timeout time.Duration) (string, string, error) {
+	logging.Debugf("fetchPublicIPv4 request: testUrls=%v timeout=%s", testURLs, timeout)
 	if timeout <= 0 {
 		timeout = defaultDynIPResolveTimeout
 	}
+	logging.Debugf("fetchPublicIPv4 effective timeout: %s", timeout)
 	client := &http.Client{Timeout: timeout}
 	tried := 0
 	for _, rawURL := range testURLs {
@@ -31,15 +35,22 @@ func fetchPublicIPv4(testURLs []string, timeout time.Duration) (string, string, 
 			continue
 		}
 		tried++
+		logging.Debugf("fetchPublicIPv4 try: url=%s", url)
 		ip, err := fetchIPv4FromURL(client, url)
 		if err == nil {
+			logging.Debugf("fetchPublicIPv4 response: ip=%s resolvedBy=%s err=<nil>", ip, url)
 			return ip, url, nil
 		}
+		logging.Debugf("fetchPublicIPv4 response: ip=\"\" resolvedBy=\"\" url=%s err=%v", url, err)
 	}
 	if tried == 0 {
-		return "", "", fmt.Errorf("no valid testUrls configured")
+		err := fmt.Errorf("no valid testUrls configured")
+		logging.Debugf("fetchPublicIPv4 response: ip=\"\" resolvedBy=\"\" err=%v", err)
+		return "", "", err
 	}
-	return "", "", fmt.Errorf("all testUrls failed to return a valid IPv4")
+	err := fmt.Errorf("all testUrls failed to return a valid IPv4")
+	logging.Debugf("fetchPublicIPv4 response: ip=\"\" resolvedBy=\"\" err=%v", err)
+	return "", "", err
 }
 
 func fetchIPv4FromURL(client *http.Client, url string) (string, error) {

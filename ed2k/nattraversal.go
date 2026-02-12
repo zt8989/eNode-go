@@ -100,7 +100,7 @@ func (h *NATTraversalHandler) SetRegisterEndpointForLocalPort(localPort uint16, 
 	h.announcePortByLocal[localPort] = announcePort
 }
 
-func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
+func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
 	if len(data) == 0 || remote == nil || conn == nil {
 		return
 	}
@@ -119,7 +119,11 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 		if len(out.packet) > 0 && out.packet[0] == PrNat {
 			LogNATRaw("nat", "send", target, out.packet)
 		}
-		_, _ = conn.WriteToUDP(out.packet, out.to)
+		wire := out.packet
+		if crypt != nil && crypt.Status == CsEncrypting {
+			wire = crypt.Encrypt(out.packet)
+		}
+		_, _ = conn.WriteToUDP(wire, out.to)
 	}
 }
 

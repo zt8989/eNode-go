@@ -124,6 +124,7 @@ func main() {
 		natTTL := time.Duration(cfg.NAT.RegistrationTTLSeconds) * time.Second
 		natHandler := ed2k.NewNATTraversalHandler(natTTL)
 		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.UDP.Port)
+		natHandler.SetRegisterEndpointForLocalPort(cfg.NAT.Port, cfg.UDP.Port)
 		if cfg.SupportCrypt && cfg.UDP.PortObfuscated != 0 {
 			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortObfuscated, cfg.UDP.PortObfuscated)
 		}
