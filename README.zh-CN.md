@@ -28,6 +28,10 @@
 - 支持大于 4 GiB 的文件
 - 易于扩展多种存储引擎
 
+## NAT Traversal 传输截图
+
+![NAT traversal 传输截图](images/E35D333390376E311EA081CAD69D85D7.png)
+
 ## 配置
 
 运行配置使用 YAML：

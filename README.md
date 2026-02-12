@@ -30,6 +30,10 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - Files larger than 4 GiB
 - Easy support for multiple storage engines
 
+## NAT Traversal Transfer Screenshot
+
+![NAT traversal transfer screenshot](images/E35D333390376E311EA081CAD69D85D7.png)
+
 ## Configuration
 
 Runtime config is YAML:
