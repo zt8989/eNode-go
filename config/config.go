@@ -10,15 +10,16 @@ import (
 )
 
 type Config struct {
-	Name         string `yaml:"name"`
-	Description  string `yaml:"description"`
-	Address      string `yaml:"address"`
-	DynIP        string `yaml:"dynIp"`
-	MessageLowID string `yaml:"messageLowID"`
-	MessageLogin string `yaml:"messageLogin"`
-	NoAssert     bool   `yaml:"noAssert"`
-	LogLevel     string `yaml:"logLevel"`
-	LogFile      string `yaml:"logFile"`
+	Name         string   `yaml:"name"`
+	Description  string   `yaml:"description"`
+	Address      string   `yaml:"address"`
+	DynIP        string   `yaml:"dynIp"`
+	TestURLs     []string `yaml:"testUrls"`
+	MessageLowID string   `yaml:"messageLowID"`
+	MessageLogin string   `yaml:"messageLogin"`
+	NoAssert     bool     `yaml:"noAssert"`
+	LogLevel     string   `yaml:"logLevel"`
+	LogFile      string   `yaml:"logFile"`
 
 	SupportCrypt bool `yaml:"supportCrypt"`
 	RequestCrypt bool `yaml:"requestCrypt"`
@@ -103,6 +104,14 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.LogFile == "" {
 		cfg.LogFile = "logs/enode.log"
+	}
+	if len(cfg.TestURLs) == 0 {
+		cfg.TestURLs = []string{
+			"https://4.ipw.cn",
+			"https://ip.3322.net",
+			"https://api.ipify.org",
+			"https://checkip.amazonaws.com",
+		}
 	}
 	if cfg.TCP.Port == 0 {
 		cfg.TCP.Port = 4661

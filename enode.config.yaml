@@ -1,7 +1,12 @@
 name: "(TESTING!!!) eNode"
 description: "eNode: experimental ed2k server written in node.js"
 address: ""
-dynIp: ""
+dynIp: "auto"
+testUrls:
+  - "https://4.ipw.cn"
+  - "https://ip.3322.net"
+  - "https://api.ipify.org"
+  - "https://checkip.amazonaws.com"
 
 messageLowID: "You have LowID."
 messageLogin: "Welcome to eNode!"

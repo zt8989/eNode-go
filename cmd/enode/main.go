@@ -34,6 +34,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("config load failed: %v", err)
 	}
+	resolvedDynIP, resolvedByURL, err := resolveDynIPValue(cfg.DynIP, cfg.TestURLs, 0)
+	if err != nil {
+		log.Fatalf("resolve dynIp failed: %v", err)
+	}
+	if resolvedByURL != "" {
+		logging.Infof("dynIp auto resolved: %s (url=%s)", resolvedDynIP, resolvedByURL)
+	}
+	cfg.DynIP = resolvedDynIP
 	if err := logging.SetOutputFile(cfg.LogFile); err != nil {
 		log.Fatalf("config logFile invalid: %v", err)
 	}
