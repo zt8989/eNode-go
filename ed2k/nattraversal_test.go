@@ -228,6 +228,114 @@ func TestNATRegisterUsesObfuscatedPortByLocalListener(t *testing.T) {
 	}
 }
 
+func TestNATRegisterOnNatPortReturnsPlainUDPPort(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	handler.SetRegisterEndpoint("66.154.127.95", 4665)
+	handler.SetRegisterEndpointForLocalPort(2004, 4665)
+	handler.SetRegisterEndpointForLocalPort(5559, 5559)
+
+	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	hash := bytes.Repeat([]byte{0x7a}, 16)
+
+	outs := handler.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004)
+	if len(outs) != 1 {
+		t.Fatalf("responses len=%d", len(outs))
+	}
+	_, payload, ok := decodeNATPacket(outs[0].packet)
+	if !ok || len(payload) != 6 {
+		t.Fatalf("bad register ack")
+	}
+	gotPort := binary.BigEndian.Uint16(payload[0:2])
+	if gotPort != 4665 {
+		t.Fatalf("port=%d want=4665", gotPort)
+	}
+}
+
+func TestNATSync2ReturnsSyncExToRegisterExClient(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	remoteA := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	remoteB := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 40002}
+
+	hashA := bytes.Repeat([]byte{0xa1}, 16)
+	hashB := bytes.Repeat([]byte{0xb2}, 16)
+
+	registerA := append(append([]byte(nil), hashA...), byte(1))
+	if got := handler.processPacket(encodeNATPacket(OpNatRegisterEx, registerA), remoteA, 2004); len(got) != 1 {
+		t.Fatalf("register A responses len=%d", len(got))
+	}
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB, 2004); len(got) != 1 {
+		t.Fatalf("register B responses len=%d", len(got))
+	}
+
+	connAck := []byte{0x12, 0x34, 0x56, 0x78}
+	sync2Payload := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
+	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA, 2004)
+	if len(outs) != 2 {
+		t.Fatalf("sync2 responses len=%d", len(outs))
+	}
+
+	for _, out := range outs {
+		opcode, payload, ok := decodeNATPacket(out.packet)
+		if !ok {
+			t.Fatalf("decode sync response failed")
+		}
+		switch out.to.Port {
+		case remoteA.Port:
+			if opcode != OpNatSyncEx {
+				t.Fatalf("A opcode=%#x want=%#x", opcode, OpNatSyncEx)
+			}
+			if len(payload) != 27 {
+				t.Fatalf("A payload len=%d want=27", len(payload))
+			}
+			if payload[26] != 0 {
+				t.Fatalf("A peer version=%d want=0", payload[26])
+			}
+		case remoteB.Port:
+			if opcode != OpNatSync {
+				t.Fatalf("B opcode=%#x want=%#x", opcode, OpNatSync)
+			}
+			if len(payload) != 26 {
+				t.Fatalf("B payload len=%d want=26", len(payload))
+			}
+		default:
+			t.Fatalf("unexpected target port %d", out.to.Port)
+		}
+	}
+}
+
+func TestNATRegisterWithLegacyStatsKeepsSyncOpcode(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	remoteA := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
+	remoteB := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 40002}
+
+	hashA := bytes.Repeat([]byte{0xc1}, 16)
+	hashB := bytes.Repeat([]byte{0xd2}, 16)
+	legacyStats := []byte{0x00, 0x03, 0x00, 0x04, 0x00, 0x05}
+	registerA := append(append([]byte(nil), hashA...), legacyStats...)
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, registerA), remoteA, 2004); len(got) != 1 {
+		t.Fatalf("register A responses len=%d", len(got))
+	}
+	if got := handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB, 2004); len(got) != 1 {
+		t.Fatalf("register B responses len=%d", len(got))
+	}
+
+	connAck := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	sync2Payload := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
+	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2Payload), remoteA, 2004)
+	if len(outs) != 2 {
+		t.Fatalf("sync2 responses len=%d", len(outs))
+	}
+	for _, out := range outs {
+		opcode, _, ok := decodeNATPacket(out.packet)
+		if !ok {
+			t.Fatalf("decode sync response failed")
+		}
+		if opcode != OpNatSync {
+			t.Fatalf("opcode=%#x want=%#x", opcode, OpNatSync)
+		}
+	}
+}
+
 func TestNATEntriesSharedAcrossAllListenerPorts(t *testing.T) {
 	handler := NewNATTraversalHandler(time.Minute)
 	handler.SetRegisterEndpoint("66.154.127.95", 2004)
@@ -283,8 +391,18 @@ func TestNATKeepaliveOneByteRefreshesLastSeen(t *testing.T) {
 
 	time.Sleep(5 * time.Millisecond)
 	outs := handler.processPacket([]byte{0x42}, remote, 2004)
-	if len(outs) != 0 {
-		t.Fatalf("keepalive should not generate outbound packets")
+	if len(outs) != 1 {
+		t.Fatalf("keepalive responses len=%d", len(outs))
+	}
+	opcode, payload, ok := decodeNATPacket(outs[0].packet)
+	if !ok {
+		t.Fatalf("decode keepalive response failed")
+	}
+	if opcode != OpNatPing {
+		t.Fatalf("keepalive response opcode=%#x want=%#x", opcode, OpNatPing)
+	}
+	if len(payload) != 0 {
+		t.Fatalf("keepalive response payload len=%d want=0", len(payload))
 	}
 
 	entryAfter, ok := handler.get(key)
@@ -313,8 +431,18 @@ func TestNATKeepaliveOpcodeRefreshesLastSeen(t *testing.T) {
 
 	time.Sleep(5 * time.Millisecond)
 	outs := handler.processPacket(encodeNATPacket(OpNatKeepAlive, nil), remote, 2004)
-	if len(outs) != 0 {
-		t.Fatalf("nat keepalive should not generate outbound packets")
+	if len(outs) != 1 {
+		t.Fatalf("nat keepalive responses len=%d", len(outs))
+	}
+	opcode, payload, ok := decodeNATPacket(outs[0].packet)
+	if !ok {
+		t.Fatalf("decode nat keepalive response failed")
+	}
+	if opcode != OpNatPing {
+		t.Fatalf("nat keepalive response opcode=%#x want=%#x", opcode, OpNatPing)
+	}
+	if len(payload) != 0 {
+		t.Fatalf("nat keepalive response payload len=%d want=0", len(payload))
 	}
 
 	entryAfter, ok := handler.get(key)
@@ -323,5 +451,17 @@ func TestNATKeepaliveOpcodeRefreshesLastSeen(t *testing.T) {
 	}
 	if !entryAfter.lastSeen.After(entryBefore.lastSeen) {
 		t.Fatalf("lastSeen not refreshed: before=%v after=%v", entryBefore.lastSeen, entryAfter.lastSeen)
+	}
+}
+
+func TestNATKeepaliveUnregisteredClientNoPing(t *testing.T) {
+	handler := NewNATTraversalHandler(time.Minute)
+	remote := &net.UDPAddr{IP: net.ParseIP("10.0.0.9"), Port: 40009}
+
+	if got := handler.processPacket([]byte{0x42}, remote, 2004); len(got) != 0 {
+		t.Fatalf("legacy keepalive for unregistered client should not respond, len=%d", len(got))
+	}
+	if got := handler.processPacket(encodeNATPacket(OpNatKeepAlive, nil), remote, 2004); len(got) != 0 {
+		t.Fatalf("nat keepalive for unregistered client should not respond, len=%d", len(got))
 	}
 }
