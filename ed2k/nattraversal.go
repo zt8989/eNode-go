@@ -27,6 +27,7 @@ type NATTraversalConfig struct {
 type natClientEntry struct {
 	hash     [16]byte
 	addr     *net.UDPAddr
+	version  uint8
 	lastSeen time.Time
 }
 
@@ -157,6 +158,12 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, lo
 			"[module=nat] dir=recv, remote=%s, opcode=KEEPALIVE(1-byte), value=0x%02x, matched=%t",
 			remote.String(), data[0], matched,
 		)
+		if matched {
+			return []natOutbound{{
+				to:     cloneUDPAddr(remote),
+				packet: encodeNATPacket(OpNatPing, nil),
+			}}
+		}
 		return nil
 	}
 	if data[0] != PrNat {
@@ -168,13 +175,21 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, lo
 	}
 	switch opcode {
 	case OpNatRegister:
-		return h.handleRegister(remote, payload, localPort)
+		return h.handleRegister(remote, payload, localPort, false)
+	case OpNatRegisterEx:
+		return h.handleRegister(remote, payload, localPort, true)
 	case OpNatKeepAlive:
 		matched := h.touchByAddr(remote)
 		logging.Debugf(
 			"[module=nat] dir=recv, remote=%s, opcode=%s, payloadLen=%d, matched=%t",
 			remote.String(), natOpcodeLabel(OpNatKeepAlive), len(payload), matched,
 		)
+		if matched {
+			return []natOutbound{{
+				to:     cloneUDPAddr(remote),
+				packet: encodeNATPacket(OpNatPing, nil),
+			}}
+		}
 		return nil
 	case OpNatSync2:
 		return h.handleSync2(remote, payload)
@@ -183,13 +198,17 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, lo
 	}
 }
 
-func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte, localPort uint16) []natOutbound {
+func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte, localPort uint16, isEx bool) []natOutbound {
 	if len(payload) < 16 {
 		return nil
 	}
 	var hash [16]byte
 	copy(hash[:], payload[:16])
-	h.upsert(hash, remote)
+	version := uint8(0)
+	if isEx && len(payload) >= 17 {
+		version = payload[16]
+	}
+	h.upsert(hash, remote, version)
 
 	resp := make([]byte, 6)
 	h.mu.RLock()
@@ -219,7 +238,7 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) [
 
 	src, srcOK := h.get(srcHash)
 	if !srcOK {
-		h.upsert(srcHash, remote)
+		h.upsert(srcHash, remote, 0)
 		src, _ = h.get(srcHash)
 	}
 	dst, dstOK := h.get(dstHash)
@@ -255,32 +274,42 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) [
 	return []natOutbound{
 		{
 			to:     cloneUDPAddr(src.addr),
-			packet: buildNATSyncPacket(dst.addr, dst.hash, connAck),
+			packet: buildNATSyncPacket(dst.addr, dst.hash, connAck, dst.version, src.version),
 		},
 		{
 			to:     cloneUDPAddr(dst.addr),
-			packet: buildNATSyncPacket(src.addr, src.hash, connAck),
+			packet: buildNATSyncPacket(src.addr, src.hash, connAck, src.version, dst.version),
 		},
 	}
 }
 
-func buildNATSyncPacket(peer *net.UDPAddr, peerHash [16]byte, connAck []byte) []byte {
-	payload := make([]byte, 26)
+func buildNATSyncPacket(peer *net.UDPAddr, peerHash [16]byte, connAck []byte, peerVersion uint8, receiverVersion uint8) []byte {
+	payloadSize := 26
+	opcode := OpNatSync
+	if receiverVersion > 0 {
+		opcode = OpNatSyncEx
+		payloadSize = 27
+	}
+	payload := make([]byte, payloadSize)
 	if peer != nil {
 		binary.BigEndian.PutUint32(payload[0:4], ipv4ToUint32(peer.IP))
 		binary.BigEndian.PutUint16(payload[4:6], uint16(peer.Port))
 	}
 	copy(payload[6:22], peerHash[:])
 	copy(payload[22:26], connAck)
-	return encodeNATPacket(OpNatSync, payload)
+	if opcode == OpNatSyncEx {
+		payload[26] = peerVersion
+	}
+	return encodeNATPacket(opcode, payload)
 }
 
-func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr) {
+func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version uint8) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.entries[hash] = natClientEntry{
 		hash:     hash,
 		addr:     cloneUDPAddr(remote),
+		version:  version,
 		lastSeen: time.Now(),
 	}
 }
@@ -408,12 +437,16 @@ func ipv4ToUint32(ip net.IP) uint32 {
 
 func natOpcodeLabel(opcode uint8) string {
 	switch opcode {
+	case OpNatRegisterEx:
+		return "OP_NATREGISTER_EX(0xe3)"
 	case OpNatRegister:
 		return "OP_NATREGISTER(0xe4)"
 	case OpNatSync2:
 		return "OP_NATSYNC2(0xe9)"
 	case OpNatSync:
 		return "OP_NATSYNC(0xe1)"
+	case OpNatSyncEx:
+		return "OP_NATSYNC_EX(0xe7)"
 	case OpNatFailed:
 		return "OP_NATFAILED(0xe5)"
 	case OpNatKeepAlive:
@@ -435,6 +468,11 @@ func natOpcodeLabel(opcode uint8) string {
 
 func formatNATPayload(opcode uint8, payload []byte) string {
 	switch opcode {
+	case OpNatRegisterEx:
+		if len(payload) >= 17 {
+			return fmt.Sprintf("hash=%x version=%d", payload[:16], payload[16])
+		}
+		return fmt.Sprintf("payloadLen=%d hex=%s", len(payload), hex.EncodeToString(payload))
 	case OpNatRegister:
 		if len(payload) >= 16 {
 			out := fmt.Sprintf("hash=%x", payload[:16])
@@ -459,6 +497,14 @@ func formatNATPayload(opcode uint8, payload []byte) string {
 			port := binary.BigEndian.Uint16(payload[4:6])
 			return fmt.Sprintf("peerIP=%d peerIPv4=%s peerPort=%d peerHash=%x connAck=%x",
 				ipv4, uint32ToIPv4BE(ipv4), port, payload[6:22], payload[22:26])
+		}
+	case OpNatSyncEx:
+		if len(payload) >= 27 {
+			ipv4 := binary.BigEndian.Uint32(payload[0:4])
+			port := binary.BigEndian.Uint16(payload[4:6])
+			version := payload[26]
+			return fmt.Sprintf("peerIP=%d peerIPv4=%s peerPort=%d peerHash=%x connAck=%x version=%d",
+				ipv4, uint32ToIPv4BE(ipv4), port, payload[6:22], payload[22:26], version)
 		}
 	case OpNatFailed:
 		if len(payload) >= 17 {

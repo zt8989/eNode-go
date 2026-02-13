@@ -41,16 +41,18 @@ const (
 )
 
 const (
-	OpNatSync      uint8 = 0xe1
-	OpNatPing      uint8 = 0xe2
-	OpNatRegister  uint8 = 0xe4
-	OpNatFailed    uint8 = 0xe5
-	OpNatKeepAlive uint8 = 0xe6
-	OpNatReping    uint8 = 0xe8
-	OpNatSync2     uint8 = 0xe9
-	OpNatData      uint8 = 0xea
-	OpNatAck       uint8 = 0xeb
-	OpNatRst       uint8 = 0xef
+	OpNatSync       uint8 = 0xe1
+	OpNatPing       uint8 = 0xe2
+	OpNatRegisterEx uint8 = 0xe3
+	OpNatRegister   uint8 = 0xe4
+	OpNatFailed     uint8 = 0xe5
+	OpNatKeepAlive  uint8 = 0xe6
+	OpNatSyncEx     uint8 = 0xe7
+	OpNatReping     uint8 = 0xe8
+	OpNatSync2      uint8 = 0xe9
+	OpNatData       uint8 = 0xea
+	OpNatAck        uint8 = 0xeb
+	OpNatRst        uint8 = 0xef
 )
 
 const (
