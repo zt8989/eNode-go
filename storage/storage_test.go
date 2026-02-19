@@ -33,4 +33,7 @@ func TestMemoryEngineClientAndFiles(t *testing.T) {
 	if m.ClientsCount() != 0 {
 		t.Fatalf("disconnect failed")
 	}
+	if len(m.GetSources(hash, 100)) != 0 {
+		t.Fatalf("disconnect should remove client sources from OP_GETSOURCES result")
+	}
 }

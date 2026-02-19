@@ -175,6 +175,79 @@ func TestUDPPlainNATRegisterReplyIsPlaintext(t *testing.T) {
 	}
 }
 
+func TestNATKeepaliveReplyUsesSameUDPListenerPort(t *testing.T) {
+	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
+	nat := NewNATTraversalHandler(time.Minute)
+	rt.SetNATHandler(nat)
+	handler := rt.UDPHandler(false)
+
+	serverConnA, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen server udp A: %v", err)
+	}
+	defer serverConnA.Close()
+	serverConnB, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen server udp B: %v", err)
+	}
+	defer serverConnB.Close()
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen client udp: %v", err)
+	}
+	defer clientConn.Close()
+
+	var hash [16]byte
+	for i := range hash {
+		hash[i] = byte(0xa0 + i)
+	}
+
+	readNAT := func(timeout time.Duration) (uint8, *net.UDPAddr) {
+		t.Helper()
+		_ = clientConn.SetReadDeadline(time.Now().Add(timeout))
+		buf := make([]byte, 2048)
+		n, from, err := clientConn.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("read nat packet: %v", err)
+		}
+		opcode, _, ok := decodeNATPacket(buf[:n])
+		if !ok {
+			t.Fatalf("decode nat packet failed")
+		}
+		return opcode, from
+	}
+
+	remote := clientConn.LocalAddr().(*net.UDPAddr)
+
+	handler(encodeNATPacket(OpNatRegister, hash[:]), remote, serverConnA)
+	opcode, from := readNAT(2 * time.Second)
+	if opcode != OpNatRegister {
+		t.Fatalf("register ack opcode=0x%x want=0x%x", opcode, OpNatRegister)
+	}
+	if from.Port != serverConnA.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("register ack source port=%d want=%d", from.Port, serverConnA.LocalAddr().(*net.UDPAddr).Port)
+	}
+
+	handler(encodeNATPacket(OpNatKeepAlive, nil), remote, serverConnA)
+	opcode, from = readNAT(2 * time.Second)
+	if opcode != OpNatPing {
+		t.Fatalf("keepalive ping opcode=0x%x want=0x%x", opcode, OpNatPing)
+	}
+	if from.Port != serverConnA.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("keepalive ping source port=%d want=%d", from.Port, serverConnA.LocalAddr().(*net.UDPAddr).Port)
+	}
+
+	handler(encodeNATPacket(OpNatKeepAlive, nil), remote, serverConnB)
+	opcode, from = readNAT(2 * time.Second)
+	if opcode != OpNatPing {
+		t.Fatalf("keepalive ping opcode on listener B=0x%x want=0x%x", opcode, OpNatPing)
+	}
+	if from.Port != serverConnB.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("keepalive ping source port on listener B=%d want=%d", from.Port, serverConnB.LocalAddr().(*net.UDPAddr).Port)
+	}
+}
+
 func buildObfuscatedClientUDP(crypt *UDPCrypt, plain []byte, randomKey uint16) []byte {
 	enc := NewBuffer(len(plain) + 5)
 	_ = enc.PutUInt32LE(MagicValueUDPSyncServer)

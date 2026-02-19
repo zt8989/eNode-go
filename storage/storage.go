@@ -97,6 +97,19 @@ func (m *MemoryEngine) Disconnect(info ClientInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.clients, info.ID)
+	for k, existing := range m.sources {
+		kept := existing[:0]
+		for _, s := range existing {
+			if s.ID != info.ID {
+				kept = append(kept, s)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.sources, k)
+			continue
+		}
+		m.sources[k] = kept
+	}
 }
 
 func (m *MemoryEngine) FilesCount() int {

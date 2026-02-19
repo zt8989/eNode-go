@@ -272,7 +272,7 @@ func (m *MongoDBEngine) GetSourcesByHash(fileHash []byte) []Source {
 	defer cancel()
 	cur, err := m.db.Collection("sources").Find(
 		ctx,
-		bson.M{"file_hash": fileHash},
+		bson.M{"file_hash": fileHash, "online": true},
 		options.Find().SetSort(bson.D{{Key: "online", Value: -1}, {Key: "time_offer", Value: -1}}).SetLimit(255),
 	)
 	if err != nil {
@@ -292,7 +292,7 @@ func (m *MongoDBEngine) GetSourcesByHash(fileHash []byte) []Source {
 			Port   uint16 `bson:"port"`
 			Hash   []byte `bson:"hash"`
 		}
-		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K}).Decode(&cdoc); err == nil {
+		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K, "online": true}).Decode(&cdoc); err == nil {
 			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port, UserHash: append([]byte(nil), cdoc.Hash...)})
 		}
 	}
@@ -302,7 +302,7 @@ func (m *MongoDBEngine) GetSourcesByHash(fileHash []byte) []Source {
 func (m *MongoDBEngine) getSourcesByFile(ctx context.Context, fileHash []byte, fileSize uint64) []Source {
 	cur, err := m.db.Collection("sources").Find(
 		ctx,
-		bson.M{"file_hash": fileHash, "file_size": fileSize},
+		bson.M{"file_hash": fileHash, "file_size": fileSize, "online": true},
 		options.Find().SetSort(bson.D{{Key: "online", Value: -1}, {Key: "time_offer", Value: -1}}).SetLimit(255),
 	)
 	if err != nil {
@@ -322,7 +322,7 @@ func (m *MongoDBEngine) getSourcesByFile(ctx context.Context, fileHash []byte, f
 			Port   uint16 `bson:"port"`
 			Hash   []byte `bson:"hash"`
 		}
-		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K}).Decode(&cdoc); err == nil {
+		if err := m.db.Collection("clients").FindOne(ctx, bson.M{"id_ed2k": s.ClientED2K, "online": true}).Decode(&cdoc); err == nil {
 			out = append(out, Source{ID: cdoc.IDEd2K, Port: cdoc.Port, UserHash: append([]byte(nil), cdoc.Hash...)})
 		}
 	}
