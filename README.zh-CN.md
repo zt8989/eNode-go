@@ -44,17 +44,74 @@
 go run ./cmd/enode -config enode.config.yaml
 ```
 
-关键配置项：
+完整配置说明（字段含义）：
 
 ```yaml
-storage:
-  engine: memory   # memory | mysql | mongodb
+name: "(TESTING!!!) eNode"   # 服务器名称，对外展示
+description: "eNode ..."     # 服务器描述，对外展示
+address: ""                  # 本地监听地址；空时默认 0.0.0.0
+dynIp: "auto"                # 对外通告 IP；auto 时通过 testUrls 动态探测
+testUrls:                    # dynIp=auto 时依次请求，取第一个可用 IPv4
+  - "https://4.ipw.cn"
+  - "https://ip.3322.net"
+  - "https://api.ipify.org"
+  - "https://checkip.amazonaws.com"
+
+messageLowID: "You have LowID."   # LowID 登录提示
+messageLogin: "Welcome to eNode!" # 普通登录提示
+
+noAssert: false              # 兼容历史行为的断言开关（默认关闭）
+logLevel: "debug"            # 日志级别：debug|info|warn|error
+logFile: "logs/enode.log"    # 日志文件路径
+
+supportCrypt: true           # 是否启用协议混淆支持
+requestCrypt: true           # 是否请求客户端使用混淆
+requireCrypt: true           # 是否强制客户端必须混淆
+auxiliarPort: false          # 是否声明额外端口能力
+IPinLogin: false             # 登录流程中是否包含 IP 信息
+
+tcp:
+  port: 5555                 # TCP 主端口
+  portObfuscated: 5565       # TCP 混淆端口（supportCrypt=true 时使用）
+  maxConnections: 1000000    # 最大连接数
+  connectionTimeout: 2000    # 连接建立阶段超时（毫秒）
+  disconnectTimeout: 3600    # 空闲断开超时（秒）
+  allowLowIDs: true          # 是否允许 LowID 客户端
+  minLowID: 1                # LowID 分配最小值
+  maxLowID: 16777215         # LowID 分配最大值
+
+udp:
+  port: 5559                 # UDP 主端口
+  portObfuscated: 5569       # UDP 混淆端口
+  getSources: true           # 允许 UDP 来源查询
+  getFiles: true             # 允许 UDP 文件查询
+  serverKey: 305419896       # UDP 混淆/握手相关 server key
 
 natTraversal:
-  enabled: true
-  port: 2004
-  registrationTTLSeconds: 600
+  enabled: true              # 是否启用 NAT 穿透服务
+  port: 2004                 # NAT 穿透 UDP 端口
+  registrationTTLSeconds: 30 # NAT 注册表项有效期（秒）
+
+storage:
+  engine: memory             # 存储引擎：memory | mysql | mongodb
+  mysql:
+    host: localhost          # MySQL 主机
+    port: 3306               # MySQL 端口
+    user: enode              # MySQL 用户
+    pass: password           # MySQL 密码
+    database: enode          # MySQL 数据库
+    connections: 8           # MySQL 连接池上限
+    deadlockDelay: 100       # 死锁重试等待（毫秒）
+  mongodb:
+    host: 127.0.0.1          # MongoDB 主机（uri 为空时使用）
+    port: 27017              # MongoDB 端口（uri 为空时使用）
+    database: enode          # MongoDB 数据库名
+    uri: ""                  # MongoDB 连接串；非空时优先
 ```
+
+`address` 与 `dynIp` 的区别：
+- `address` 决定服务端绑定监听在哪个本地地址/网卡。
+- `dynIp` 决定向客户端通告的服务器 IP（用于客户端回连与 NAT 相关流程）。
 
 MySQL 示例：
 

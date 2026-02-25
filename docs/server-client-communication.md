@@ -60,9 +60,10 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_NAT_REGISTER` | `0xe4` | NAT Server -> Client | Register ACK with server endpoint (`port(2, BE) + ip(4, BE)`). |
 | `OP_NAT_SYNC2` | `0xe9` | Client -> NAT Server | Ask server to pair source hash with target hash (`srcHash(16)+connAck(4)+dstHash(16)`). |
 | `OP_NAT_SYNC` | `0xe1` | NAT Server -> Client | Peer endpoint exchange (`peerIP(4, BE)+peerPort(2, BE)+peerHash(16)+connAck(4)`). |
+| `OP_NAT_PING` | `0xe2` | NAT Server -> Client | NAT keepalive ACK ping (empty payload) after accepted keepalive. |
 | `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered). |
-| `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen` for registered endpoint. |
-| keepalive (non-`PR_NAT`, legacy) | n/a | Client -> NAT Server | Legacy raw 1-byte UDP heartbeat without NAT header; still accepted for compatibility. |
+| `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen` and receives `OP_NAT_PING` when endpoint is registered. |
+| keepalive (non-`PR_NAT`, legacy) | n/a | Client -> NAT Server | Legacy raw 1-byte UDP heartbeat; still accepted and receives `OP_NAT_PING` when endpoint is registered. |
 
 ## Payload Data Format
 
@@ -114,6 +115,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_NAT_SYNC` | `peerIP(uint32, BE) + peerPort(uint16, BE) + peerHash(hash16) + connAck(uint32)` |
 | `OP_NAT_FAILED` | `reason(uint8) + targetHash(hash16)` (implemented reason: `0x01`) |
 | `OP_NAT_KEEPALIVE` | Empty payload (`payloadLen=0`) |
+| `OP_NAT_PING` | Empty payload (`payloadLen=0`) |
 | legacy keepalive (non-`PR_NAT`) | Raw single-byte UDP packet (no NAT envelope/opcode) |
 
 ## Notes

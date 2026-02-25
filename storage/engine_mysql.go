@@ -203,7 +203,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
-		 WHERE f.hash = ? AND f.size = ?
+		 WHERE f.hash = ? AND f.size = ? AND s.online = 1 AND c.online = 1
 		 ORDER BY s.online DESC, s.time_offer DESC
 		 LIMIT 255`,
 		fileHash, fileSize,
@@ -231,7 +231,7 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
-		 WHERE f.hash = ?
+		 WHERE f.hash = ? AND s.online = 1 AND c.online = 1
 		 ORDER BY s.online DESC, s.time_offer DESC
 		 LIMIT 255`,
 		fileHash,

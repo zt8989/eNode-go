@@ -46,17 +46,74 @@ Start command supports custom path:
 go run ./cmd/enode -config enode.config.yaml
 ```
 
-Important config section:
+Full config field reference:
 
 ```yaml
-storage:
-  engine: memory   # memory | mysql | mongodb
+name: "(TESTING!!!) eNode"   # Server name shown to clients
+description: "eNode ..."     # Server description shown to clients
+address: ""                  # Local bind address; default is 0.0.0.0
+dynIp: "auto"                # Public advertised IP; auto resolves via testUrls
+testUrls:                    # Used only when dynIp=auto, first valid IPv4 wins
+  - "https://4.ipw.cn"
+  - "https://ip.3322.net"
+  - "https://api.ipify.org"
+  - "https://checkip.amazonaws.com"
+
+messageLowID: "You have LowID."   # Message sent to LowID clients
+messageLogin: "Welcome to eNode!" # Message sent on login
+
+noAssert: false              # Compatibility assert switch (normally false)
+logLevel: "debug"            # Log level: debug|info|warn|error
+logFile: "logs/enode.log"    # Log file path
+
+supportCrypt: true           # Enable protocol obfuscation support
+requestCrypt: true           # Request obfuscation from clients
+requireCrypt: true           # Require obfuscation from clients
+auxiliarPort: false          # Advertise auxiliary port capability
+IPinLogin: false             # Include IP in login flow
+
+tcp:
+  port: 5555                 # Main TCP port
+  portObfuscated: 5565       # Obfuscated TCP port (when supportCrypt=true)
+  maxConnections: 1000000    # Max concurrent connections
+  connectionTimeout: 2000    # Connect-stage timeout (ms)
+  disconnectTimeout: 3600    # Idle disconnect timeout (s)
+  allowLowIDs: true          # Allow LowID clients
+  minLowID: 1                # Minimum allocated LowID
+  maxLowID: 16777215         # Maximum allocated LowID
+
+udp:
+  port: 5559                 # Main UDP port
+  portObfuscated: 5569       # Obfuscated UDP port
+  getSources: true           # Enable UDP source queries
+  getFiles: true             # Enable UDP file queries
+  serverKey: 305419896       # Server key for UDP obfuscation/handshake
 
 natTraversal:
-  enabled: true
-  port: 2004
-  registrationTTLSeconds: 600
+  enabled: true              # Enable NAT traversal service
+  port: 2004                 # NAT traversal UDP port
+  registrationTTLSeconds: 30 # NAT registry TTL (seconds)
+
+storage:
+  engine: memory             # Storage engine: memory | mysql | mongodb
+  mysql:
+    host: localhost          # MySQL host
+    port: 3306               # MySQL port
+    user: enode              # MySQL user
+    pass: password           # MySQL password
+    database: enode          # MySQL database
+    connections: 8           # MySQL connection pool cap
+    deadlockDelay: 100       # Deadlock retry delay (ms)
+  mongodb:
+    host: 127.0.0.1          # MongoDB host (used when uri is empty)
+    port: 27017              # MongoDB port (used when uri is empty)
+    database: enode          # MongoDB database name
+    uri: ""                  # MongoDB URI; takes precedence when set
 ```
+
+`address` vs `dynIp`:
+- `address` controls local bind/listen address on this machine.
+- `dynIp` controls the public IP advertised to clients.
 
 For MySQL:
 

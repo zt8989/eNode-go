@@ -76,6 +76,10 @@ func DispatchNATPacket(
 		if info, ok := DecodeSyncPayload(payload); ok && onSync != nil {
 			onSync(info, payload)
 		}
+	case ed2k.OpNatSyncEx:
+		if info, ok := DecodeSyncPayload(payload); ok && onSync != nil {
+			onSync(info, payload)
+		}
 	case ed2k.OpNatFailed:
 		if onFailed != nil {
 			onFailed(payload)
