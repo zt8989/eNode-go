@@ -259,7 +259,7 @@ func dispatchIncomingTCPPacket(t *testing.T, client *tcpClient, items []PacketIt
 	}
 
 	packet := NewPacket()
-	if err := packet.Init(NewBufferFromBytes(wire.Bytes()), nil); err != nil {
+	if err := packet.Init(NewBufferFromBytes(wire.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	if packet.Status != PsReady {

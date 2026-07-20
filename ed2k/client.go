@@ -58,9 +58,14 @@ func (c *Client) BuildHandshake(randomProtocol uint8, randomKey uint32, pad []by
 	binary.LittleEndian.PutUint32(key[17:], randomKey)
 	sendSeed := MD5(key)
 
+	// Both keys hash all 21 bytes (userhash 16 + magic 1 + randomKey 4); only the
+	// magic byte differs. See EncryptedStreamSocket.cpp:
+	//   SendKey    = MD5(<UserHash 16><MAGICVALUE_34 1><RandomKeyPart 4>)
+	//   ReceiveKey = MD5(<UserHash 16><MAGICVALUE_203 1><RandomKeyPart 4>)
+	// key[17:21] still holds randomKey here: the copy below rewrites only key[0:16].
 	copy(key, c.Hash)
 	key[16] = MagicValue203
-	recvSeed := MD5(key[:17])
+	recvSeed := MD5(key)
 
 	c.SendKey = RC4CreateKey(sendSeed, true)
 	c.RecvKey = RC4CreateKey(recvSeed, true)

@@ -6,14 +6,29 @@ import (
 	"enode/storage"
 )
 
+// MaxSearchExprDepth bounds how deeply a boolean search expression may nest.
+// Each 0x00 token costs 2 bytes and recurses twice, so without a limit a peer
+// can drive the parser past Go's 1 GB stack ceiling — which is a runtime throw,
+// not a panic, so no recover() could contain it.
+//
+// 24 matches eMule, which uses the same value when *building* an expression:
+// srchybrid/kademlia/net/KademliaUDPListener.cpp:889 and
+// src/core/kademlia/KadUDPListener.cpp:525. The C++ comment notes the parse
+// limit has to match the generation limit, so a lower value here would reject
+// queries real clients legitimately emit.
+const MaxSearchExprDepth = 24
+
 func ParseSearchExpr(b *Buffer) (*storage.SearchExpr, error) {
 	if b == nil {
 		return nil, fmt.Errorf("search buffer is nil")
 	}
-	return parseSearchExpr(b)
+	return parseSearchExpr(b, 0)
 }
 
-func parseSearchExpr(b *Buffer) (*storage.SearchExpr, error) {
+func parseSearchExpr(b *Buffer, depth int) (*storage.SearchExpr, error) {
+	if depth >= MaxSearchExprDepth {
+		return nil, fmt.Errorf("search expression nested deeper than %d levels", MaxSearchExprDepth)
+	}
 	token, err := b.GetUInt8()
 	if err != nil {
 		return nil, err
@@ -71,11 +86,14 @@ func parseSearchExpr(b *Buffer) (*storage.SearchExpr, error) {
 		if err != nil {
 			return nil, err
 		}
-		left, err := parseSearchExpr(b)
+		// Only the boolean token recurses, so incrementing here counts nesting
+		// levels rather than nodes — matching how eMule seeds and advances
+		// iLevel in CreateSearchExpressionTree.
+		left, err := parseSearchExpr(b, depth+1)
 		if err != nil {
 			return nil, err
 		}
-		right, err := parseSearchExpr(b)
+		right, err := parseSearchExpr(b, depth+1)
 		if err != nil {
 			return nil, err
 		}

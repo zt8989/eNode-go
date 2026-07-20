@@ -56,19 +56,26 @@ func BuildFoundSourcesObfuPacket(fileHash []byte, sources []storage.Source) (*Bu
 }
 
 func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []storage.Source, withObfuSettings bool) (*Buffer, error) {
+	// The count is a single byte, so truncate the slice rather than the count:
+	// uint8(256) is 0, which tells the client there are no sources and leaves the
+	// 256 records that follow to be parsed as the next packet.
+	sources = capWireSources(sources)
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: opcode},
 		{Type: TypeHash, Value: fileHash},
 		{Type: TypeUint8, Value: uint8(len(sources))},
 	}
 	for _, src := range sources {
-		port := src.Port
-		if withObfuSettings && isLowID(src.ID) {
-			port = 0xFFFF
-		}
+		// The port is sent verbatim for LowID sources too. There is no 0xFFFF
+		// sentinel in the ed2k protocol: eMule stores whatever arrives here
+		// (UpDownClient.cpp assigns m_userPort before it even looks at LowID) and
+		// then republishes it through source exchange, so a fabricated port
+		// propagates to peers that never contacted this server. Worse, ClientList
+		// and DeadSourceList key on (IP, port), so the same peer learned via
+		// OP_FOUNDSOURCES and via source exchange would never deduplicate.
 		pack = append(pack,
 			PacketItem{Type: TypeUint32, Value: src.ID},
-			PacketItem{Type: TypeUint16, Value: port},
+			PacketItem{Type: TypeUint16, Value: src.Port},
 		)
 		if withObfuSettings {
 			// OP_FOUNDSOURCES_OBFU requires one extra "obfuscation settings" byte per source.
@@ -125,6 +132,10 @@ func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {
 }
 
 func BuildServerListPacket(servers []storage.Server) (*Buffer, error) {
+	// Same single-byte count as the source lists, and ServersAll() is unbounded.
+	if len(servers) > storage.MaxWireSources {
+		servers = servers[:storage.MaxWireSources]
+	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerList},
 		{Type: TypeUint8, Value: uint8(len(servers))},
@@ -226,4 +237,14 @@ func BuildCallbackRequestedPacket(ipv4 uint32, port uint16) (*Buffer, error) {
 		return nil, err
 	}
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
+}
+
+// capWireSources truncates to what a single-byte count can describe. Applied at
+// the wire layer as well as in the engines so the count and the record count
+// cannot disagree, whichever engine supplied the slice.
+func capWireSources(sources []storage.Source) []storage.Source {
+	if len(sources) > storage.MaxWireSources {
+		return sources[:storage.MaxWireSources]
+	}
+	return sources
 }

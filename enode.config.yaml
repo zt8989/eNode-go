@@ -7,6 +7,8 @@ testUrls:
   - "https://ip.3322.net"
   - "https://api.ipify.org"
   - "https://checkip.amazonaws.com"
+  # Returns key=value lines rather than a bare IP; parseIPResponse reads the ip= line.
+  - "https://www.cloudflare.com/cdn-cgi/trace"
 
 messageLowID: "You have LowID."
 messageLogin: "Welcome to eNode!"
@@ -45,6 +47,18 @@ natTraversal:
 
 storage:
   engine: memory
+  cleanup:
+    # Expires offline clients and their sources. Without it, rows accumulate for
+    # the lifetime of the deployment and the online-count index only defers the
+    # cost of scanning them.
+    enabled: true
+    staleAfterHours: 24
+    intervalMinutes: 60
+    # Kad and source exchange can still find sources for a file the server has
+    # no online source for, so the search result stays useful — it is how a user
+    # discovers the hash in the first place. Defaults to true when omitted.
+    keepZeroSourceFiles: true
+    batchSize: 1000
   mysql:
     database: enode
     host: localhost

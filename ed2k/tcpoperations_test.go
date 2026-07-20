@@ -75,8 +75,16 @@ func TestBuildSearchAndSources(t *testing.T) {
 	if fpObfu.Bytes()[29] != 0 {
 		t.Fatalf("obfu options mismatch: got=%d", fpObfu.Bytes()[29])
 	}
-	if fpObfu.Bytes()[27] != 0xff || fpObfu.Bytes()[28] != 0xff {
-		t.Fatalf("obfu lowid port mismatch: got=%02x%02x", fpObfu.Bytes()[27], fpObfu.Bytes()[28])
+	// ID 11 is a LowID. The obfu variant used to overwrite its port with a
+	// fabricated 0xFFFF; the port must be the real one, byte-identical to what
+	// the non-obfuscated packet carries.
+	if fpObfu.Bytes()[27] != 22 || fpObfu.Bytes()[28] != 0 {
+		t.Fatalf("obfu lowid port mismatch: got=%02x%02x want=1600",
+			fpObfu.Bytes()[27], fpObfu.Bytes()[28])
+	}
+	if fpObfu.Bytes()[27] != fp.Bytes()[27] || fpObfu.Bytes()[28] != fp.Bytes()[28] {
+		t.Fatalf("obfu and non-obfu ports differ: obfu=%02x%02x normal=%02x%02x",
+			fpObfu.Bytes()[27], fpObfu.Bytes()[28], fp.Bytes()[27], fp.Bytes()[28])
 	}
 	fpObfuHash, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
 		ID: 11, Port: 22, UserHash: []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},

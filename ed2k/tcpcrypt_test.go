@@ -30,8 +30,8 @@ func TestTCPCryptNegotiateAndHandshake(t *testing.T) {
 	if len(resp) <= CryptPrimeSize {
 		t.Fatalf("unexpected negotiate response size: %d", len(resp))
 	}
-	if tc.State != CsNegotiating {
-		t.Fatalf("status mismatch after negotiate: %d", tc.State)
+	if tc.State() != CsNegotiating {
+		t.Fatalf("status mismatch after negotiate: %d", tc.State())
 	}
 
 	plain := NewBuffer(4 + 1 + 1 + 1)
@@ -40,14 +40,15 @@ func TestTCPCryptNegotiateAndHandshake(t *testing.T) {
 	_ = plain.PutUInt8(0)
 	plain.PutBuffer([]byte{0x99})
 
-	clientKey := cloneRC4Key(tc.RecvKey)
+	recvKey, _ := tc.RecvCipher()
+	clientKey := cloneRC4Key(recvKey)
 	wire := RC4Crypt(plain.Bytes(), len(plain.Bytes()), clientKey)
 	rest, err := tc.ProcessData(NewBufferFromBytes(wire))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tc.State != CsEncrypting {
-		t.Fatalf("status mismatch after handshake: %d", tc.State)
+	if tc.State() != CsEncrypting {
+		t.Fatalf("status mismatch after handshake: %d", tc.State())
 	}
 	if !bytes.Equal(rest, []byte{0x99}) {
 		t.Fatalf("unexpected remaining payload: %v", rest)

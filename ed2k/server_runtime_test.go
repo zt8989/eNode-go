@@ -1,8 +1,8 @@
 package ed2k
 
 import (
-	"bytes"
 	"encoding/binary"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -25,36 +25,10 @@ func (m *mockConn) SetDeadline(_ time.Time) error      { return nil }
 func (m *mockConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-func TestReplaceSessionClosesOldConnection(t *testing.T) {
-	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
-	oldConn := &mockConn{}
-	newConn := &mockConn{}
-	oldClient := &tcpClient{conn: oldConn, remoteHost: "old"}
-	newClient := &tcpClient{conn: newConn, remoteHost: "new"}
-
-	rt.replaceSession("h:abc", oldClient)
-	rt.replaceSession("h:abc", newClient)
-
-	if oldConn.closed != 1 {
-		t.Fatalf("expected old connection closed once, got %d", oldConn.closed)
-	}
-	if newConn.closed != 0 {
-		t.Fatalf("unexpected new connection close count: %d", newConn.closed)
-	}
-}
-
-func TestLoginSessionKey(t *testing.T) {
-	hash := bytes.Repeat([]byte{1}, 16)
-	if got := loginSessionKey(hash, 0); got == "" || got[:2] != "h:" {
-		t.Fatalf("unexpected hash key: %q", got)
-	}
-	if got := loginSessionKey(nil, 0x1234); got != "i:00001234" {
-		t.Fatalf("unexpected id key: %q", got)
-	}
-	if got := loginSessionKey(nil, 0); got != "" {
-		t.Fatalf("expected empty key, got: %q", got)
-	}
-}
+// The session map and its replaceSession/loginSessionKey helpers are gone. They
+// implemented "evict the existing session", which was remotely triggerable with
+// a public user hash; duplicate logins are now rejected instead. Coverage for
+// the replacement lives in duplicate_login_test.go.
 
 func TestNewServerRuntimeSetsDefaultServerStatusInterval(t *testing.T) {
 	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
@@ -245,6 +219,67 @@ func TestNATKeepaliveReplyUsesSameUDPListenerPort(t *testing.T) {
 	}
 	if from.Port != serverConnB.LocalAddr().(*net.UDPAddr).Port {
 		t.Fatalf("keepalive ping source port on listener B=%d want=%d", from.Port, serverConnB.LocalAddr().(*net.UDPAddr).Port)
+	}
+}
+
+// TestFileFromRecordNarrowedIntTags covers the metadata tags eMule narrows to
+// TAGTYPE_UINT8 because their values are small: source counts, media runtime and
+// bitrate (128/192/256 all fit in a byte). Before normalization each exact uint32
+// assertion failed and every one of these fields was stored as zero.
+func TestFileFromRecordNarrowedIntTags(t *testing.T) {
+	record := FileRecord{
+		Hash:     []byte{5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5},
+		Size:     4096,
+		Complete: true,
+		Tags: map[string]any{
+			"name":            "song.mp3",
+			"sources":         uint64(3),   // wire TAGTYPE_UINT8
+			"completesources": uint64(1),   // wire TAGTYPE_UINT8
+			"length":          uint64(210), // wire TAGTYPE_UINT8
+			"bitrate":         uint64(128), // wire TAGTYPE_UINT8
+		},
+	}
+	info := storage.ClientInfo{ID: 0x0100007f, Port: 4662}
+	t.Logf("input: tags=%v", record.Tags)
+
+	file := fileFromRecord(record, info)
+	t.Logf("output: Sources=%d Completed=%d Runtime=%d Bitrate=%d Type=%q",
+		file.Sources, file.Completed, file.Runtime, file.Bitrate, file.Type)
+
+	for _, c := range []struct {
+		field string
+		got   uint32
+		want  uint32
+	}{
+		{"Sources", file.Sources, 3},
+		{"Completed", file.Completed, 1},
+		{"Runtime", file.Runtime, 210},
+		{"Bitrate", file.Bitrate, 128},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s mismatch: got %d, want %d", c.field, c.got, c.want)
+		}
+	}
+}
+
+// TestFileFromRecordSaturatesOversizedTag pins the saturation rule in tagUint32
+// for values that do not fit a uint32 field, so a hostile or buggy client cannot
+// wrap a count around to a small number.
+func TestFileFromRecordSaturatesOversizedTag(t *testing.T) {
+	record := FileRecord{
+		Hash: []byte{6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6},
+		Tags: map[string]any{
+			"name":    "evil.bin",
+			"sources": uint64(1) << 40,
+		},
+	}
+	t.Logf("input: sources=%d (exceeds uint32)", uint64(1)<<40)
+
+	file := fileFromRecord(record, storage.ClientInfo{})
+	t.Logf("output: Sources=%d", file.Sources)
+
+	if file.Sources != math.MaxUint32 {
+		t.Fatalf("Sources mismatch: got %d, want %d (saturate, not wrap)", file.Sources, uint32(math.MaxUint32))
 	}
 }
 

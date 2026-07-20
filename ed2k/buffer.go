@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 var (
@@ -62,6 +63,17 @@ func (e *TagDecodeError) Unwrap() error {
 	return e.Err
 }
 
+// Smallest number of bytes a single element can occupy on the wire. Used by
+// checkWireCount to reject a declared count that the remaining bytes could not
+// possibly supply.
+const (
+	// A short-format tag whose type nibble encodes a zero-length string is just
+	// the type byte and the code byte — see GetTag, tagType&0x7f == 0x10.
+	minTagBytes = 2
+	// hash(16) + id(4) + port(2) + tag count(4), with no tags.
+	minFileRecordBytes = 26
+)
+
 type Buffer struct {
 	data    []byte
 	pointer int
@@ -91,6 +103,15 @@ func (b *Buffer) Pos(pos ...int) int {
 		b.pointer = len(b.data)
 	}
 	return b.pointer
+}
+
+// Remaining reports how many bytes are left to read. Used to sanity-check
+// wire-supplied element counts before allocating for them.
+func (b *Buffer) Remaining() int {
+	if b.pointer >= len(b.data) {
+		return 0
+	}
+	return len(b.data) - b.pointer
 }
 
 func (b *Buffer) require(n int) error {
@@ -162,6 +183,15 @@ func (b *Buffer) GetUInt64LE() (uint64, error) {
 	hi := binary.LittleEndian.Uint32(b.data[b.pointer+4:])
 	b.pointer += 8
 	return uint64(lo) + uint64(hi)*0x100000000, nil
+}
+
+func (b *Buffer) PutUInt64LE(n uint64) error {
+	if err := b.require(8); err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint64(b.data[b.pointer:], n)
+	b.pointer += 8
+	return nil
 }
 
 func (b *Buffer) GetString(length ...int) (string, error) {
@@ -246,6 +276,8 @@ func TagsLength(tags []Tag) (int, error) {
 			length += 2
 		case TypeUint32:
 			length += 4
+		case TypeUint64:
+			length += 8
 		default:
 			return 0, fmt.Errorf("%w: 0x%x", ErrUnsupportedTag, t.Type)
 		}
@@ -298,6 +330,15 @@ func (b *Buffer) PutTag(tag Tag) error {
 		default:
 			return ErrUnsupportedTag
 		}
+	case TypeUint64:
+		switch v := tag.Data.(type) {
+		case uint64:
+			return b.PutUInt64LE(v)
+		case int:
+			return b.PutUInt64LE(uint64(v))
+		default:
+			return ErrUnsupportedTag
+		}
 	default:
 		return fmt.Errorf("%w: 0x%x", ErrUnsupportedTag, tag.Type)
 	}
@@ -315,16 +356,30 @@ func (b *Buffer) PutTags(tags []Tag) error {
 	return nil
 }
 
+// GetTagValue decodes a tag payload. All integer widths are normalized to uint64
+// so that consumers can type-assert a single type.
+//
+// eMule narrows every integer tag by magnitude when NEWTAGS is advertised
+// (CTag::WriteNewEd2kTag): <=0xff becomes TAGTYPE_UINT8, <=0xffff TAGTYPE_UINT16,
+// and so on. Returning the wire width as a distinct Go type meant an exact
+// assertion such as Tags["size"].(uint32) silently failed for any file under
+// 64 KiB, and for the FT_FILESIZE_HI of any large file (the high dword of a 5 GiB
+// file is 1, so it ships as TAGTYPE_UINT8).
 func (b *Buffer) GetTagValue(typ uint8) (any, error) {
 	switch typ {
 	case TypeString:
 		return b.GetString()
 	case TypeUint8:
-		return b.GetUInt8()
+		v, err := b.GetUInt8()
+		return uint64(v), err
 	case TypeUint16:
-		return b.GetUInt16LE()
+		v, err := b.GetUInt16LE()
+		return uint64(v), err
 	case TypeUint32:
-		return b.GetUInt32LE()
+		v, err := b.GetUInt32LE()
+		return uint64(v), err
+	case TypeUint64:
+		return b.GetUInt64LE()
 	default:
 		return nil, fmt.Errorf("%w: 0x%x", ErrUnsupportedTag, typ)
 	}
@@ -446,6 +501,9 @@ func (b *Buffer) GetTags() ([]NamedTag, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkWireCount(count, b.Remaining(), minTagBytes, "tags"); err != nil {
+		return nil, err
+	}
 	tags := make([]NamedTag, 0, count)
 	for i := uint32(0); i < count; i++ {
 		tag, err := b.GetTag()
@@ -460,6 +518,9 @@ func (b *Buffer) GetTags() ([]NamedTag, error) {
 func (b *Buffer) GetFileList() ([]FileRecord, error) {
 	count, err := b.GetUInt32LE()
 	if err != nil {
+		return nil, err
+	}
+	if err := checkWireCount(count, b.Remaining(), minFileRecordBytes, "file records"); err != nil {
 		return nil, err
 	}
 	files := make([]FileRecord, 0, count)
@@ -495,15 +556,57 @@ func (b *Buffer) GetFileList() ([]FileRecord, error) {
 		} else if id == ValCompleteID && port == ValCompletePort {
 			record.Complete = true
 		}
-		if v, ok := record.Tags["size"].(uint32); ok {
-			record.SizeLo = v
-			record.Size = uint64(v)
+		if v, ok := tagUint64(record.Tags, "size"); ok {
+			record.SizeLo = uint32(v)
+			record.Size = v
 		}
-		if v, ok := record.Tags["sizehi"].(uint32); ok {
-			record.SizeHi = v
-			record.Size += uint64(v) * 0x100000000
+		if v, ok := tagUint64(record.Tags, "sizehi"); ok {
+			record.SizeHi = uint32(v)
+			record.Size += v * 0x100000000
 		}
 		files = append(files, record)
 	}
 	return files, nil
+}
+
+// checkWireCount rejects an element count that could not possibly be backed by
+// the bytes still in the buffer.
+//
+// Both GetTags and GetFileList size their slice from a 4-byte wire count, so a
+// declared 0xFFFFFFFF reserves ~137 GB of NamedTag or ~275 GB of FileRecord
+// from a handful of bytes. Comparing against the smallest legal encoding gives
+// a bound that no honest peer can trip.
+//
+// The count itself is rejected rather than clamped on purpose: clamping the
+// loop would silently accept a truncated list, and every record after it would
+// then be framed from the wrong offset instead of failing with ErrOutOfBounds.
+func checkWireCount(count uint32, remaining, minBytesEach int, what string) error {
+	if remaining < 0 {
+		remaining = 0
+	}
+	if uint64(count) > uint64(remaining/minBytesEach) {
+		return fmt.Errorf("%w: %s count %d exceeds %d remaining bytes",
+			ErrOutOfBounds, what, count, remaining)
+	}
+	return nil
+}
+
+// tagUint64 reads a normalized integer tag. GetTagValue returns every integer
+// width as uint64, so a single assertion covers TAGTYPE_UINT8/16/32/64 alike.
+func tagUint64(tags map[string]any, key string) (uint64, bool) {
+	v, ok := tags[key].(uint64)
+	return v, ok
+}
+
+// tagUint32 reads an integer tag destined for a uint32 field, saturating rather
+// than wrapping if a client sends an implausibly large value.
+func tagUint32(tags map[string]any, key string) (uint32, bool) {
+	v, ok := tagUint64(tags, key)
+	if !ok {
+		return 0, false
+	}
+	if v > math.MaxUint32 {
+		return math.MaxUint32, true
+	}
+	return uint32(v), true
 }

@@ -3,6 +3,7 @@ package ed2k
 import (
 	"errors"
 	"math/big"
+	"sync"
 )
 
 const (
@@ -10,11 +11,20 @@ const (
 	MagicValueRequester = 34
 )
 
+// TCPCrypt owns the obfuscation state machine for one connection.
+//
+// state/sendKey/recvKey are guarded by mu because they are read from goroutines
+// other than the one driving the connection: writeRaw is reachable from the
+// status ticker and from a peer's OP_CALLBACKREQUEST, while only the owning
+// goroutine advances the state machine. RC4 is a stateful stream cipher, so a
+// torn read of the key corrupts the rest of the stream, not just one packet.
 type TCPCrypt struct {
-	Packet  *Packet
-	State   int
-	SendKey *RC4Key
-	RecvKey *RC4Key
+	Packet *Packet
+
+	mu      sync.RWMutex
+	state   int
+	sendKey *RC4Key
+	recvKey *RC4Key
 }
 
 func NewTCPCrypt(packet *Packet, supportCrypt bool) *TCPCrypt {
@@ -22,12 +32,14 @@ func NewTCPCrypt(packet *Packet, supportCrypt bool) *TCPCrypt {
 	if supportCrypt {
 		status = CsUnknown
 	}
-	return &TCPCrypt{Packet: packet, State: status}
+	return &TCPCrypt{Packet: packet, state: status}
 }
 
 func (t *TCPCrypt) ProcessData(buffer *Buffer) ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.Packet.Data = NewBufferFromBytes(buffer.Get())
-	switch t.State {
+	switch t.state {
 	case CsNone:
 		return nil, nil
 	case CsUnknown:
@@ -36,14 +48,14 @@ func (t *TCPCrypt) ProcessData(buffer *Buffer) ([]byte, error) {
 			return nil, err
 		}
 		t.Packet.Status = PsCryptNegotiating
-		t.State = CsNegotiating
+		t.state = CsNegotiating
 		return resp, nil
 	case CsNegotiating:
 		rest, err := t.handshake(buffer.Bytes())
 		if err != nil {
 			return nil, err
 		}
-		t.State = CsEncrypting
+		t.state = CsEncrypting
 		t.Packet.Status = PsNew
 		return rest, nil
 	default:
@@ -51,12 +63,40 @@ func (t *TCPCrypt) ProcessData(buffer *Buffer) ([]byte, error) {
 	}
 }
 
+func (t *TCPCrypt) State() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.state
+}
+
+func (t *TCPCrypt) SetState(state int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state = state
+}
+
+// SendCipher returns the send key, and whether the stream is encrypting. Both
+// are read under one lock: a caller that checked the state separately could
+// pair a stale state with a freshly rotated key.
+func (t *TCPCrypt) SendCipher() (*RC4Key, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.sendKey, t.state == CsEncrypting
+}
+
+// RecvCipher mirrors SendCipher for the receive direction.
+func (t *TCPCrypt) RecvCipher() (*RC4Key, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.recvKey, t.state == CsEncrypting
+}
+
 func (t *TCPCrypt) StatusValue() int {
-	return t.State
+	return t.State()
 }
 
 func (t *TCPCrypt) CryptStatus() int {
-	return t.State
+	return t.State()
 }
 
 func (t *TCPCrypt) negotiate() ([]byte, error) {
@@ -91,9 +131,9 @@ func (t *TCPCrypt) negotiate() ([]byte, error) {
 	copy(kBuf[CryptPrimeSize-len(kBytes):CryptPrimeSize], kBytes)
 
 	kBuf[CryptPrimeSize] = MagicValueServer
-	t.SendKey = RC4CreateKey(MD5(kBuf), true)
+	t.sendKey = RC4CreateKey(MD5(kBuf), true)
 	kBuf[CryptPrimeSize] = MagicValueRequester
-	t.RecvKey = RC4CreateKey(MD5(kBuf), true)
+	t.recvKey = RC4CreateKey(MD5(kBuf), true)
 
 	pad, err := RandBuf(Rand(16))
 	if err != nil {
@@ -106,7 +146,7 @@ func (t *TCPCrypt) negotiate() ([]byte, error) {
 	_ = rc4Buf.PutUInt8(uint8(EmPreferred))
 	_ = rc4Buf.PutUInt8(uint8(len(pad)))
 	rc4Buf.PutBuffer(pad)
-	enc := RC4Crypt(rc4Buf.Bytes(), len(rc4Buf.Bytes()), t.SendKey)
+	enc := RC4Crypt(rc4Buf.Bytes(), len(rc4Buf.Bytes()), t.sendKey)
 
 	BBytes := B.Bytes()
 	bout := make([]byte, CryptPrimeSize)
@@ -114,11 +154,13 @@ func (t *TCPCrypt) negotiate() ([]byte, error) {
 	return append(bout, enc...), nil
 }
 
+// handshake is called from ProcessData with t.mu already held, so it reads the
+// guarded fields directly rather than through the accessors.
 func (t *TCPCrypt) handshake(buffer []byte) ([]byte, error) {
-	if t.State != CsNegotiating {
+	if t.state != CsNegotiating {
 		return nil, errors.New("bad crypt status")
 	}
-	data := RC4Crypt(buffer, len(buffer), t.RecvKey)
+	data := RC4Crypt(buffer, len(buffer), t.recvKey)
 	b := NewBufferFromBytes(data)
 	sync, err := b.GetUInt32LE()
 	if err != nil {
@@ -143,8 +185,8 @@ func (t *TCPCrypt) handshake(buffer []byte) ([]byte, error) {
 }
 
 func (t *TCPCrypt) Decrypt(buffer []byte) []byte {
-	if t.State == CsEncrypting {
-		return RC4Crypt(buffer, len(buffer), t.RecvKey)
+	if key, encrypting := t.RecvCipher(); encrypting {
+		return RC4Crypt(buffer, len(buffer), key)
 	}
 	return buffer
 }

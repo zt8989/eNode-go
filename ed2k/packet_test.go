@@ -2,19 +2,10 @@ package ed2k
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"testing"
 )
-
-type mockCrypt struct {
-	status int
-	called bool
-}
-
-func (m *mockCrypt) CryptStatus() int { return m.status }
-func (m *mockCrypt) Process(_ *Buffer) error {
-	m.called = true
-	return nil
-}
 
 func TestMakePacketAndUDPPacket(t *testing.T) {
 	items := []PacketItem{
@@ -91,7 +82,7 @@ func TestPacketInitAndAppend(t *testing.T) {
 		PrED2K, 0x03, 0x00, 0x00, 0x00, 0x34, 'A', 'B',
 	})
 	p := NewPacket()
-	if err := p.Init(wire, nil); err != nil {
+	if err := p.Init(wire); err != nil {
 		t.Fatal(err)
 	}
 	if p.Protocol != PrED2K || p.Code != 0x34 || p.Size != 2 {
@@ -118,15 +109,57 @@ func TestPacketAppendWithExcess(t *testing.T) {
 	}
 }
 
-func TestPacketInitUnknownProtocolUsesCrypt(t *testing.T) {
+// A non-protocol first byte is no longer Init's problem: handleBytes decides
+// whether the stream is obfuscated before Init ever sees it. Init just declines
+// to parse the frame. (The previous test here passed a mockCrypt and so only
+// exercised a branch that production never reached — the caller passed nil.)
+func TestPacketInitUnknownProtocolIsNotParsed(t *testing.T) {
 	wire := NewBufferFromBytes([]byte{0xff, 0x11, 0x22})
 	p := NewPacket()
-	m := &mockCrypt{status: CsUnknown}
-	if err := p.Init(wire, m); err != nil {
+	t.Logf("input: %v", wire.Bytes())
+	if err := p.Init(wire); err != nil {
 		t.Fatal(err)
 	}
-	if !m.called {
-		t.Fatalf("expected crypt to be called")
+	t.Logf("output: protocol=0x%x status=%d size=%d", p.Protocol, p.Status, p.Size)
+	if p.Status == PsReady {
+		t.Fatalf("unknown protocol must not produce a ready packet: status=%d", p.Status)
+	}
+	if p.Protocol != 0xff {
+		t.Fatalf("protocol mismatch: 0x%x", p.Protocol)
+	}
+}
+
+func TestPacketInitRejectsOversizedDeclaration(t *testing.T) {
+	// A 6-byte header declaring a ~4 GiB payload. Without the bound, Init
+	// allocates the declared size from these six bytes alone.
+	wire := NewBufferFromBytes([]byte{PrED2K, 0xff, 0xff, 0xff, 0xff, 0x01})
+	p := NewPacket()
+	t.Logf("input: %v (declares payload=%d bytes)", wire.Bytes(), uint32(0xffffffff)-1)
+	err := p.Init(wire)
+	t.Logf("output: err=%v allocated=%d", err, len(p.Data.Bytes()))
+	if !errors.Is(err, ErrPacketTooLarge) {
+		t.Fatalf("expected ErrPacketTooLarge, got %v", err)
+	}
+	if len(p.Data.Bytes()) > MaxTCPPacketSize {
+		t.Fatalf("oversized buffer was allocated: %d bytes", len(p.Data.Bytes()))
+	}
+}
+
+func TestPacketInitAcceptsMaximumSize(t *testing.T) {
+	// Exactly at the ceiling must still parse. An off-by-one here would drop
+	// legitimate large packets, which is a quieter failure than accepting one.
+	header := make([]byte, 6)
+	header[0] = PrED2K
+	binary.LittleEndian.PutUint32(header[1:5], MaxTCPPacketSize+1) // +1 covers the opcode byte
+	header[5] = OpServerMessage
+	p := NewPacket()
+	t.Logf("input: declared payload=%d, max=%d", MaxTCPPacketSize, MaxTCPPacketSize)
+	if err := p.Init(NewBufferFromBytes(header)); err != nil {
+		t.Fatalf("a size exactly at the ceiling must be accepted: %v", err)
+	}
+	t.Logf("output: size=%d status=%d", p.Size, p.Status)
+	if p.Size != MaxTCPPacketSize {
+		t.Fatalf("size mismatch: got %d want %d", p.Size, MaxTCPPacketSize)
 	}
 }
 

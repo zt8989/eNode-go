@@ -1,0 +1,92 @@
+package ed2k
+
+import (
+	"sync"
+	"time"
+
+	"enode/storage"
+)
+
+// defaultCounterCacheTTL bounds how stale the advertised client and file counts
+// may be. These feed the totals in OP_SERVERSTATUS and OP_GLOBSERVSTATRES, which
+// clients only display — nothing branches on them — so ten seconds is invisible
+// to a user and is already far fresher than the five-minute cadence at which any
+// client is told anything.
+//
+// The TTL is deliberately not tied to ServerStatusInterval: it is what bounds
+// the cost of a UDP status flood, which arrives at whatever rate an attacker
+// chooses.
+const defaultCounterCacheTTL = 10 * time.Second
+
+// counterCache serves ClientsCount and FilesCount from one shared, briefly
+// cached reading.
+//
+// Both callers issued two COUNT(*) queries per call: the per-client status
+// ticker (one goroutine per logged-in client) and udpGlobServStatReq, which is
+// unauthenticated and unthrottled. `SELECT COUNT(*) FROM clients WHERE online=1`
+// had no index to use, so a UDP status flood turned into unbounded concurrent
+// full table scans — cheap to send, expensive to serve.
+//
+// Refresh is lazy rather than driven by a background ticker. A ticker costs
+// 2/TTL queries per second unconditionally, so it only pays off above roughly
+// interval/TTL concurrent clients (~30 at the defaults) and is a straight
+// regression below that — on a single-client server it would turn 0.007 q/s into
+// 0.2 q/s. Refreshing on read is never worse than not caching, and still caps
+// cost at 2/TTL under any load.
+type counterCache struct {
+	engine storage.Engine
+	ttl    time.Duration
+
+	mu      sync.Mutex
+	clients int
+	files   int
+	fetched time.Time
+	// refreshing serialises concurrent readers onto one query, so a burst of
+	// datagrams arriving on a cold cache does not each start their own.
+	refreshing bool
+	done       chan struct{}
+}
+
+func newCounterCache(engine storage.Engine, ttl time.Duration) *counterCache {
+	if ttl <= 0 {
+		ttl = defaultCounterCacheTTL
+	}
+	return &counterCache{engine: engine, ttl: ttl}
+}
+
+// Counts returns the cached client and file totals, refreshing them if stale.
+func (c *counterCache) Counts() (clients, files int) {
+	for {
+		c.mu.Lock()
+		if !c.fetched.IsZero() && time.Since(c.fetched) < c.ttl {
+			clients, files = c.clients, c.files
+			c.mu.Unlock()
+			return clients, files
+		}
+		if c.refreshing {
+			// Someone else is already querying. Wait for their result rather than
+			// issuing a duplicate; this is the single-flight that keeps a flood
+			// from multiplying into one query per datagram.
+			wait := c.done
+			c.mu.Unlock()
+			<-wait
+			continue
+		}
+		c.refreshing = true
+		c.done = make(chan struct{})
+		c.mu.Unlock()
+
+		newClients := c.engine.ClientsCount()
+		newFiles := c.engine.FilesCount()
+
+		c.mu.Lock()
+		c.clients, c.files = newClients, newFiles
+		c.fetched = time.Now()
+		c.refreshing = false
+		close(c.done)
+		c.done = nil
+		clients, files = c.clients, c.files
+		c.mu.Unlock()
+		return clients, files
+	}
+}

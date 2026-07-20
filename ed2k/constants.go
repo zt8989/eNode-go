@@ -62,6 +62,7 @@ const (
 	TypeFloat  uint8 = 0x04
 	TypeUint16 uint8 = 0x08
 	TypeUint8  uint8 = 0x09
+	TypeUint64 uint8 = 0x0b
 	TypeTags   uint8 = 0x0f
 )
 
@@ -71,6 +72,22 @@ const (
 	PsWaitingData      = 3
 	PsCryptNegotiating = 4
 )
+
+// MaxTCPPacketSize bounds the payload size a peer may declare in a TCP packet
+// header. Without it, the 4-byte size field is allocated verbatim, so a 6-byte
+// header can reserve ~4 GiB. eMule applies the same ceiling and drops the
+// connection past it: see src/core/net/EMSocket.cpp, kMaxReadBuffer / kErrTooBig.
+const MaxTCPPacketSize = 2_000_000
+
+// maxHelloAnswerBytes caps what the firewall probe will accumulate from the
+// peer it is probing.
+//
+// Defence in depth, not the primary bound: while readHelloAnswer rejects a
+// declared size above MaxTCPPacketSize, every packet completes and is consumed
+// once 5+size bytes arrive, so the reassembly buffer cannot exceed roughly
+// MaxTCPPacketSize plus one read. This ceiling only matters if that size check
+// is ever relaxed — which is exactly when it would be missed.
+const maxHelloAnswerBytes = 4 * MaxTCPPacketSize
 
 const (
 	CsNone        = 0

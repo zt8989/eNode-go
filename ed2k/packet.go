@@ -3,9 +3,23 @@ package ed2k
 import (
 	"bytes"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
+
+	"enode/logging"
 )
+
+// ErrPacketTooLarge is returned when a peer declares a payload above
+// MaxTCPPacketSize. Callers should drop the connection: no legitimate client
+// sends one, and the declared size is allocated up front.
+var ErrPacketTooLarge = errors.New("packet: declared size exceeds maximum")
+
+// ErrInflatedTooLarge is returned when a PR_ZLIB payload expands past
+// MaxTCPPacketSize. The wire-size check in Init bounds only the *compressed*
+// declaration, and zlib reaches roughly 1032:1, so a conforming 2 MB packet
+// still inflates to ~2 GB.
+var ErrInflatedTooLarge = errors.New("packet: inflated payload exceeds maximum")
 
 type PacketItem struct {
 	Type  uint8
@@ -27,11 +41,6 @@ type SharedFile struct {
 	Hash       []byte
 	SourceID   uint32
 	SourcePort uint16
-}
-
-type CryptState interface {
-	CryptStatus() int
-	Process(*Buffer) error
 }
 
 type Packet struct {
@@ -211,7 +220,20 @@ func InflateZlibPayload(payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer r.Close()
-	return io.ReadAll(r)
+
+	// Read one byte past the ceiling so an oversized stream can be told apart
+	// from one that merely fills it. Limiting to exactly MaxTCPPacketSize would
+	// truncate a zlib bomb into a well-formed short packet, which is then parsed
+	// as if the peer had sent it — worse than dropping the connection.
+	var out bytes.Buffer
+	n, err := io.Copy(&out, io.LimitReader(r, MaxTCPPacketSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > MaxTCPPacketSize {
+		return nil, fmt.Errorf("%w: inflated>%d max=%d", ErrInflatedTooLarge, MaxTCPPacketSize, MaxTCPPacketSize)
+	}
+	return out.Bytes(), nil
 }
 
 func AddFile(packet *[]PacketItem, file SharedFile) {
@@ -253,7 +275,10 @@ func AddFile(packet *[]PacketItem, file SharedFile) {
 	)
 }
 
-func (p *Packet) Init(buffer *Buffer, crypt CryptState) error {
+// Init parses a packet header. Obfuscation is decided before this point, by
+// tcpClient.handleBytes, which sniffs the protocol byte and routes to the crypt
+// state machine itself — so Init only ever sees plaintext framing.
+func (p *Packet) Init(buffer *Buffer) error {
 	p.HasExcess = false
 	protocol, err := buffer.GetUInt8()
 	if err != nil {
@@ -269,6 +294,9 @@ func (p *Packet) Init(buffer *Buffer, crypt CryptState) error {
 		if size == 0 {
 			return ErrOutOfBounds
 		}
+		if size-1 > MaxTCPPacketSize {
+			return fmt.Errorf("%w: declared=%d max=%d", ErrPacketTooLarge, size-1, MaxTCPPacketSize)
+		}
 		p.Size = size - 1
 		code, err := buffer.GetUInt8()
 		if err != nil {
@@ -280,9 +308,7 @@ func (p *Packet) Init(buffer *Buffer, crypt CryptState) error {
 		return nil
 	}
 
-	if crypt != nil && (crypt.CryptStatus() == CsUnknown || crypt.CryptStatus() == CsNegotiating) {
-		return crypt.Process(buffer)
-	}
+	logging.Warnf("packet init: unknown protocol 0x%x", p.Protocol)
 	return nil
 }
 

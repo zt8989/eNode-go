@@ -61,8 +61,35 @@ type NATConfig struct {
 
 type StorageConfig struct {
 	Engine  string        `yaml:"engine"`
+	Cleanup CleanupConfig `yaml:"cleanup"`
 	MySQL   MySQLConfig   `yaml:"mysql"`
 	MongoDB MongoDBConfig `yaml:"mongodb"`
+}
+
+type CleanupConfig struct {
+	Enabled         bool `yaml:"enabled"`
+	StaleAfterHours int  `yaml:"staleAfterHours"`
+	IntervalMinutes int  `yaml:"intervalMinutes"`
+	// KeepZeroSourceFiles is a *bool, not a bool, so setDefaults can tell an
+	// absent key from an explicit false. A plain bool would default to false when
+	// the key is missing — the opposite of the intended default — and would
+	// silently start deleting files for anyone whose config predates this option.
+	KeepZeroSourceFiles *bool `yaml:"keepZeroSourceFiles"`
+	BatchSize           int   `yaml:"batchSize"`
+}
+
+// KeepZeroSourceFilesOrDefault reports whether files with no remaining sources
+// are retained, defaulting to true.
+//
+// Kept by default because the server's source list is not the only way a client
+// finds peers: Kad and source exchange can locate sources for a file the server
+// knows about but currently has none online for. The search result is how a user
+// discovers the hash at all, so deleting it removes discovery for no gain.
+func (c CleanupConfig) KeepZeroSourceFilesOrDefault() bool {
+	if c.KeepZeroSourceFiles == nil {
+		return true
+	}
+	return *c.KeepZeroSourceFiles
 }
 
 type MySQLConfig struct {
@@ -137,6 +164,12 @@ func setDefaults(cfg *Config) {
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"
 	}
+	if cfg.Storage.Cleanup.StaleAfterHours <= 0 {
+		cfg.Storage.Cleanup.StaleAfterHours = 24
+	}
+	if cfg.Storage.Cleanup.IntervalMinutes <= 0 {
+		cfg.Storage.Cleanup.IntervalMinutes = 60
+	}
 	if cfg.Storage.MySQL.Port == 0 {
 		cfg.Storage.MySQL.Port = 3306
 	}
@@ -158,6 +191,9 @@ func (c Config) StorageEngineConfig() storage.Config {
 		MaxOpenConns:    c.Storage.MySQL.Connections,
 		MaxIdleConns:    c.Storage.MySQL.Connections / 2,
 		ConnMaxLifetime: 5 * time.Minute,
+		// deadlockDelay was parsed from YAML and then dropped here, so the option
+		// had no effect anywhere in the program.
+		DeadlockDelay: time.Duration(c.Storage.MySQL.DeadlockDelay) * time.Millisecond,
 	}
 	mongoURI := c.Storage.MongoDB.URI
 	if mongoURI == "" {

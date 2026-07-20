@@ -43,6 +43,8 @@ func BuildGlobSearchResPackets(files []storage.File) ([]*Buffer, error) {
 }
 
 func BuildGlobFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
+	// Single-byte count: truncate the slice, not the count. See capWireSources.
+	sources = capWireSources(sources)
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpGlobFoundSources},
 		{Type: TypeHash, Value: fileHash},

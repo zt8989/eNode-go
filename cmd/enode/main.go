@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"enode/config"
@@ -30,38 +33,86 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("config load failed: %v", err)
+	// SIGINT/SIGTERM cancel the context, which returns run() and lets its defers
+	// execute. Previously main ended in `select {}`, so every defer below —
+	// engine.Close(), the listener closes, the cleanup stoppers — was unreachable
+	// and only gave the appearance of a graceful shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, *configPath); err != nil {
+		logging.Errorf("enode exiting: %v", err)
+		os.Exit(1)
 	}
+	logging.Infof("enode stopped cleanly")
+}
+
+// run holds the whole server lifetime. It returns when ctx is cancelled, so the
+// defers registered inside it actually run.
+//
+// Errors after this point are returned rather than passed to logging.Fatalf:
+// that is zap's Fatalf, which calls os.Exit(1) and therefore skips every defer
+// already registered — including engine.Close(). A signal handler alone would
+// not have fixed those paths.
+func run(ctx context.Context, configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("config load failed: %w", err)
+	}
+	// Logging is configured before the dynIp probe so its warnings survive. The
+	// probe used to run first and exit via the stdlib logger on failure, and
+	// -daemon wires stderr to /dev/null — so a daemonized server that could not
+	// reach the internet died with no diagnostic anywhere.
+	if err := logging.SetOutputFile(cfg.LogFile); err != nil {
+		return fmt.Errorf("config logFile invalid: %w", err)
+	}
+	if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
+		return fmt.Errorf("config logLevel invalid: %w", err)
+	}
+	logging.Infof("welcome: enode starting (config=%s)", configPath)
+
 	resolvedDynIP, resolvedByURL, err := resolveDynIPValue(cfg.DynIP, cfg.TestURLs, 0)
 	if err != nil {
-		log.Fatalf("resolve dynIp failed: %v", err)
+		// Not fatal. Every consumer of DynIP already degrades: firstRoutableIP
+		// prefers cfg.Address, serverIdentitySeed falls back to the hostname, and
+		// the NAT endpoint has its own fallback. Refusing to boot because a
+		// third-party echo service is unreachable is far harsher than warranted.
+		logging.Warnf("dynIp auto resolve failed, continuing without it: %v", err)
+		resolvedDynIP = ""
 	}
 	if resolvedByURL != "" {
 		logging.Infof("dynIp auto resolved: %s (url=%s)", resolvedDynIP, resolvedByURL)
 	}
 	cfg.DynIP = resolvedDynIP
-	if err := logging.SetOutputFile(cfg.LogFile); err != nil {
-		log.Fatalf("config logFile invalid: %v", err)
-	}
-	if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
-		log.Fatalf("config logLevel invalid: %v", err)
-	}
-	logging.Infof("welcome: enode starting (config=%s)", *configPath)
 
 	engine, err := storage.NewEngine(cfg.StorageEngineConfig())
 	if err != nil {
-		logging.Fatalf("storage engine create failed: %v", err)
+		return fmt.Errorf("storage engine create failed: %w", err)
 	}
 	if err := engine.Init(); err != nil {
-		logging.Fatalf("storage init failed: %v", err)
+		return fmt.Errorf("storage init failed: %w", err)
 	}
 	defer func() {
 		if err := engine.Close(); err != nil {
 			logging.Warnf("storage close error: %v", err)
 		}
 	}()
+
+	if cfg.Storage.Cleanup.Enabled {
+		keepZeroSourceFiles := cfg.Storage.Cleanup.KeepZeroSourceFilesOrDefault()
+		stopStorageCleanup := storage.StartCleanup(
+			engine,
+			time.Duration(cfg.Storage.Cleanup.IntervalMinutes)*time.Minute,
+			time.Duration(cfg.Storage.Cleanup.StaleAfterHours)*time.Hour,
+			storage.CleanupOptions{
+				KeepZeroSourceFiles: keepZeroSourceFiles,
+				BatchSize:           cfg.Storage.Cleanup.BatchSize,
+			},
+		)
+		defer stopStorageCleanup()
+		logging.Infof("storage cleanup enabled: every %dm, stale after %dh, keepZeroSourceFiles=%t",
+			cfg.Storage.Cleanup.IntervalMinutes, cfg.Storage.Cleanup.StaleAfterHours, keepZeroSourceFiles)
+	}
 
 	tcpCfg := ed2k.TCPServerConfig{
 		Address:        cfg.Address,
@@ -82,13 +133,30 @@ func main() {
 	}
 	tcpFlags := ed2k.BuildTCPFlags(tcpCfg)
 	udpFlags := ed2k.BuildUDPFlags(udpCfg)
-	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", cfg.Address, cfg.TCP.Port)))
+
+	// The address clients are told to reach us on. cfg.Address is the *bind*
+	// address and defaults to 0.0.0.0, which IPv4ToInt32LE encodes as 0 — so
+	// OP_SERVERIDENT advertised server IP 0.0.0.0 to everyone. The UDP path
+	// already falls back to DynIP; this gives the TCP ident path the same.
+	advertisedIP := firstRoutableIP(cfg.Address, cfg.DynIP)
+	if advertisedIP == "" {
+		logging.Warnf("advertised server IP unresolved: address=%q dynIp=%q, clients will receive serverIP=0.0.0.0",
+			cfg.Address, cfg.DynIP)
+	} else if advertisedIP != cfg.Address {
+		logging.Infof("advertising server IP %s (address=%q is not routable)", advertisedIP, cfg.Address)
+	}
+
+	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", serverIdentitySeed(advertisedIP, cfg.Address), cfg.TCP.Port)))
 
 	runtime := ed2k.NewServerRuntime(
 		ed2k.TCPRuntimeConfig{
-			Name:              cfg.Name,
-			Description:       cfg.Description,
+			Name:        cfg.Name,
+			Description: cfg.Description,
+			// Address stays the bind address: probeClient uses it as its
+			// LocalAddr and special-cases the wildcard. AdvertisedIP is what goes
+			// out in OP_SERVERIDENT.
 			Address:           cfg.Address,
+			AdvertisedIP:      advertisedIP,
 			Port:              cfg.TCP.Port,
 			Flags:             tcpFlags,
 			Hash:              serverHash,
@@ -100,10 +168,14 @@ func main() {
 			SupportCrypt:      cfg.SupportCrypt,
 		},
 		ed2k.UDPRuntimeConfig{
-			Name:           cfg.Name,
-			Description:    cfg.Description,
-			DynIP:          cfg.DynIP,
-			UDPFlags:       udpFlags,
+			Name:        cfg.Name,
+			Description: cfg.Description,
+			DynIP:       cfg.DynIP,
+			UDPFlags:    udpFlags,
+			// The same two options BuildUDPFlags advertises. They must reach the
+			// dispatcher too, or the server clears the flag and keeps answering.
+			GetSources:     cfg.UDP.GetSources,
+			GetFiles:       cfg.UDP.GetFiles,
 			UDPPortObf:     cfg.UDP.PortObfuscated,
 			TCPPortObf:     cfg.TCP.PortObfuscated,
 			UDPServerKey:   cfg.UDP.ServerKey,
@@ -114,7 +186,7 @@ func main() {
 
 	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(false))
 	if err != nil {
-		logging.Fatalf("tcp server failed: %v", err)
+		return fmt.Errorf("tcp server failed: %w", err)
 	}
 	defer ln.Close()
 	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
@@ -150,7 +222,7 @@ func main() {
 			Port:    cfg.NAT.Port,
 		}, udpMainHandler)
 		if err != nil {
-			logging.Fatalf("nat traversal udp server failed: %v", err)
+			return fmt.Errorf("nat traversal udp server failed: %w", err)
 		}
 		defer natConn.Close()
 		logging.Infof("listening: nat-udp %s:%d", cfg.Address, cfg.NAT.Port)
@@ -158,7 +230,7 @@ func main() {
 
 	udpConn, err := ed2k.RunUDPServer(udpCfg, udpMainHandler)
 	if err != nil {
-		logging.Fatalf("udp server failed: %v", err)
+		return fmt.Errorf("udp server failed: %w", err)
 	}
 	defer udpConn.Close()
 	logging.Infof("listening: udp %s:%d", udpCfg.Address, udpCfg.Port)
@@ -171,20 +243,22 @@ func main() {
 
 		lnCrypt, err := ed2k.RunTCPServer(tcpCryptCfg, runtime.TCPHandler(true))
 		if err != nil {
-			logging.Fatalf("obfuscated tcp server failed: %v", err)
+			return fmt.Errorf("obfuscated tcp server failed: %w", err)
 		}
 		defer lnCrypt.Close()
 		logging.Infof("listening: tcp-obfuscated %s:%d", tcpCryptCfg.Address, tcpCryptCfg.Port)
 
 		udpConnCrypt, err := ed2k.RunUDPServer(udpCryptCfg, runtime.UDPHandler(true))
 		if err != nil {
-			logging.Fatalf("obfuscated udp server failed: %v", err)
+			return fmt.Errorf("obfuscated udp server failed: %w", err)
 		}
 		defer udpConnCrypt.Close()
 		logging.Infof("listening: udp-obfuscated %s:%d", udpCryptCfg.Address, udpCryptCfg.Port)
 	}
 
-	select {}
+	<-ctx.Done()
+	logging.Infof("shutdown signal received, stopping")
+	return nil
 }
 
 func startBackgroundProcess(args []string) (int, error) {
@@ -227,4 +301,40 @@ func filterDaemonArgs(args []string) []string {
 		filtered = append(filtered, arg)
 	}
 	return filtered
+}
+
+// firstRoutableIP returns the first candidate that is a usable advertised
+// address, or "" when none is. The wildcard is not routable: a client that
+// receives it has been told nothing.
+func firstRoutableIP(candidates ...string) string {
+	for _, c := range candidates {
+		if c != "" && c != "0.0.0.0" {
+			return c
+		}
+	}
+	return ""
+}
+
+// serverIdentitySeed picks what the server hash is derived from.
+//
+// Deriving it from cfg.Address alone meant every deployment that did not set
+// `address` computed MD5("0.0.0.0" + port) — the same hash everywhere, so
+// servers were not distinguishable by identity at all. The hostname is used when
+// no routable IP is known: unlike a random value it is stable across restarts,
+// so an unconfigured server keeps one identity instead of presenting a new one
+// after every boot.
+//
+// Two cases it does not cover, neither worth extra machinery: two unconfigured
+// servers on the same host and port would still collide (they cannot both bind
+// that port anyway), and renaming the machine changes the identity once. Setting
+// `address` or `dynIp` is the real fix.
+func serverIdentitySeed(advertisedIP, configuredAddress string) string {
+	if advertisedIP != "" {
+		return advertisedIP
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		logging.Infof("server hash derived from hostname %q: no routable address configured", host)
+		return host
+	}
+	return configuredAddress
 }

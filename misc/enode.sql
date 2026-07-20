@@ -35,7 +35,12 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `online` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `hash` (`hash`),
-  KEY `id_ed2k` (`id_ed2k`)
+  KEY `id_ed2k` (`id_ed2k`),
+  -- Composite rather than a bare (online): `online` leads, so COUNT(*) WHERE
+  -- online = 1 still gets its range scan, and the stale-row sweep's
+  -- `online = 0 AND time_login < ?` is covered too instead of filtering row by
+  -- row over every client ever seen.
+  KEY `online_time_login` (`online`,`time_login`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- --------------------------------------------------------
@@ -90,6 +95,9 @@ CREATE TABLE IF NOT EXISTS `sources` (
   KEY `id_client` (`id_client`),
   KEY `time_offer` (`time_offer`),
   KEY `online` (`online`),
+  -- The separate (online) and (time_offer) keys above cannot serve the sweep's
+  -- compound predicate together; only one of them would be used.
+  KEY `online_time_offer` (`online`,`time_offer`),
   KEY `complete` (`complete`),
   KEY `ext` (`ext`),
   KEY `type` (`type`)
