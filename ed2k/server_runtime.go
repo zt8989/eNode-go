@@ -273,6 +273,17 @@ func (c *tcpClient) isLogged() bool {
 	return c.logged
 }
 
+// isV6Capable reports whether this session can parse the IPv6 wire forms (it
+// connected over IPv6 or sent a CT_MOD_IP_V6 login tag). Unlike the same-goroutine
+// direct reads of ipv6Capable in this connection's own handlers, the callback path
+// reaches a target through the shared LowIDs table and reads it from another
+// goroutine, so it goes through the infoMu lock the login writer now holds.
+func (c *tcpClient) isV6Capable() bool {
+	c.infoMu.RLock()
+	defer c.infoMu.RUnlock()
+	return c.ipv6Capable
+}
+
 func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpClient {
 	host := ""
 	var peerIP net.IP
@@ -547,6 +558,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// itself is IPv6. ipv6Capable — used later to gate sentinel sources — is true
 	// if either signal is present.
 	var v6Bytes []byte
+	var v6Capable bool
 	if c.server.ipv6Enabled() {
 		var sentV6Tag bool
 		v6Bytes, sentV6Tag = loginIPv6(req.Tags)
@@ -555,7 +567,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 				v6Bytes = append([]byte(nil), pb[:]...)
 			}
 		}
-		c.ipv6Capable = c.connectedV6 || sentV6Tag
+		v6Capable = c.connectedV6 || sentV6Tag
 	}
 
 	c.infoMu.Lock()
@@ -566,6 +578,9 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	c.info.IPv6 = v6Bytes
+	// ipv6Capable is read cross-goroutine by the callback path (isV6Capable), so it
+	// is written under infoMu here rather than as a bare field assignment.
+	c.ipv6Capable = v6Capable
 	ipv4, port := c.info.IPv4, c.info.Port
 	c.infoMu.Unlock()
 
@@ -857,7 +872,29 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	self := c.snapshotInfo()
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d targetIPv4=%d targetPort=%d",
 		c.remoteHost, lowID, targetInfo.IPv4, targetInfo.Port)
-	if err := target.sendCallbackRequested(self.IPv4, self.Port); err != nil {
+
+	// Pick the callback family from the requester's reachability, as two separate
+	// checks. Classic IPv4 is preferred when the requester has a HighID (a routable
+	// IPv4). When it does not — LowID over IPv4, or v6-only (IPv4 == 0) — but it has
+	// a reachable public IPv6 and the target can parse the IPv6 opcode, send the
+	// IPv6 callback so the target calls back over IPv6. Otherwise the callback fails
+	// cleanly instead of pointing the target at 0.0.0.0 or a firewalled IPv4.
+	switch {
+	case !self.LowID && self.IPv4 != 0:
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv4 callbackIPv4=%d callbackPort=%d",
+			c.remoteHost, lowID, self.IPv4, self.Port)
+		err = target.sendCallbackRequested(self.IPv4, self.Port)
+	case c.server.publishV6Sources() && len(self.IPv6) == 16 && self.IPv6Reachable && target.isV6Capable():
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv6 callbackIPv6=%s callbackPort=%d",
+			c.remoteHost, lowID, net.IP(self.IPv6).String(), self.Port)
+		err = target.sendCallbackRequestedIPv6(self.IPv6, self.Port)
+	default:
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=unreachable",
+			c.remoteHost, lowID)
+		c.sendCallbackFailed()
+		return
+	}
+	if err != nil {
 		c.sendCallbackFailed()
 	}
 }
@@ -952,6 +989,14 @@ func (c *tcpClient) sendServerMessage(message string) {
 
 func (c *tcpClient) sendCallbackRequested(ipv4 uint32, port uint16) error {
 	packet, err := BuildCallbackRequestedPacket(ipv4, port)
+	if err != nil {
+		return err
+	}
+	return c.writePacket(packet)
+}
+
+func (c *tcpClient) sendCallbackRequestedIPv6(ipv6 []byte, port uint16) error {
+	packet, err := BuildCallbackRequestedIPv6Packet(ipv6, port)
 	if err != nil {
 		return err
 	}
@@ -1134,6 +1179,19 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s targetIP=%d targetPort=%d",
 			c.remoteHost, opcodeLabel(opcode), ipv4, port)
+	case OpCallbackReqdIPv6:
+		ipv6 := b.Get(16)
+		if len(ipv6) != 16 {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=short-ipv6", c.remoteHost, opcodeLabel(opcode))
+			return
+		}
+		port, err := b.GetUInt16LE()
+		if err != nil {
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			return
+		}
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s targetIPv6=%s targetPort=%d",
+			c.remoteHost, opcodeLabel(opcode), net.IP(ipv6).String(), port)
 	case OpCallbackFailed:
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s payload=empty", c.remoteHost, opcodeLabel(opcode))
 	default:
@@ -1245,6 +1303,8 @@ func opcodeLabel(opcode uint8) string {
 		return "OP_SEARCHRESULT"
 	case OpCallbackReqd:
 		return "OP_CALLBACKREQD"
+	case OpCallbackReqdIPv6:
+		return "OP_CALLBACKREQUESTED_IPV6"
 	case OpCallbackFailed:
 		return "OP_CALLBACKFAILED"
 	default:

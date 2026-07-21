@@ -23,7 +23,7 @@
 - 混淆低 ID（LowID）检测
 - Lugdunum/eMule 扩展协议
 - gzip 压缩
-- LowID 回调
+- LowID 回调（IPv4；当请求方仅能通过 IPv6 到达时，使用 `OP_CALLBACKREQUESTED_IPV6`）
 - NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）
 - 支持大于 4 GiB 的文件
 - 易于扩展多种存储引擎

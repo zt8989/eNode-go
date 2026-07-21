@@ -38,6 +38,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
 | `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
+| `OP_CALLBACKREQUESTED_IPV6` | `0x26` | Server -> v6-capable client | IPv6 form of `OP_CALLBACKREQUESTED`; sent when the requester has no usable IPv4 but a reachable public IPv6. |
 
 IPv6 is additive and opt-in; classic packets are byte-identical to before. See
 [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) for the
@@ -100,6 +101,7 @@ sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000
 | `OP_FOUNDSOURCES_OBFU` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry + obfSettings(uint8) [+ userHash(hash16) if obfSettings&0x80])` |
 | `OP_SEARCHRESULT` | Server -> Client | `resultCount(uint32) + repeated(fileRecord)`; `fileRecord = fileHash(hash16) + sourceID(uint32) + sourcePort(uint16) + tags` |
 | `OP_CALLBACKREQUESTED` | Server -> LowID Client | `targetIP(uint32) + targetPort(uint16)` |
+| `OP_CALLBACKREQUESTED_IPV6` | Server -> v6-capable LowID Client | `targetIPv6(hash16) + targetPort(uint16)` |
 | `OP_CALLBACKFAILED` | Server -> Client | Empty payload |
 
 ### UDP Payloads (Implemented Here)

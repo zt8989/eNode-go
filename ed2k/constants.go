@@ -55,6 +55,15 @@ const (
 	OpGlobFoundSourcesIPv6 uint8 = 0xa6
 )
 
+// OpCallbackReqdIPv6 is the IPv6 form of OP_CALLBACKREQUESTED (0x35): the server
+// sends it to a v6-capable, firewalled callback target so it can call back to a
+// requester that has no usable IPv4 but a reachable public IPv6. The payload is
+// <ipv6:16><port:2> — the classic packet widened from a uint32 IP to a 16-byte
+// in6_addr, no crypt trailer (matching eNode-go's classic emitter). 0x26 is the
+// next value after the IPv6 source opcodes 0x24/0x25 and is free across every
+// surveyed eMule tree, so a legacy client drops it in its ProcessPacket default.
+const OpCallbackReqdIPv6 uint8 = 0x26
+
 // SentinelIPv6ID is the ClientID value that marks an IPv6-only source inside the
 // classic OP_FOUNDSOURCES list: eMule reads 0xffffffff and then consumes 16 raw
 // in6_addr bytes that follow the port (and, for _OBFU, the crypt fields). Only

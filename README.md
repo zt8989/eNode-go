@@ -25,7 +25,8 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - Obfuscated lowID detection
 - Lugdunum/eMule extended protocol
 - gzip compression
-- LowID callbacks
+- LowID callbacks (IPv4, and IPv6 via `OP_CALLBACKREQUESTED_IPV6` when the requester
+  is only reachable over IPv6)
 - NAT traversal server (`OP_VC_NAT_HEADER`, `OP_NAT_REGISTER`, `OP_NAT_SYNC2`)
 - Files larger than 4 GiB
 - IPv6 dual-stack: accepts IPv6 client logins, records and verifies each client's

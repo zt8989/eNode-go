@@ -310,6 +310,25 @@ func BuildCallbackRequestedPacket(ipv4 uint32, port uint16) (*Buffer, error) {
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
+// BuildCallbackRequestedIPv6Packet builds the OP_CALLBACKREQUESTED_IPV6 (0x26)
+// packet the server sends to a firewalled callback target so it can call back to a
+// requester over IPv6. It mirrors BuildCallbackRequestedPacket, replacing the
+// uint32 IPv4 with the requester's 16-byte in6_addr (network byte order, emitted
+// as a HASH just like the sentinel / CT_MOD_SVR_IP_V6 paths); no crypt trailer,
+// matching the classic emitter above.
+func BuildCallbackRequestedIPv6Packet(ipv6 []byte, port uint16) (*Buffer, error) {
+	pack := []PacketItem{
+		{Type: TypeUint8, Value: OpCallbackReqdIPv6},
+		{Type: TypeHash, Value: ipv6},
+		{Type: TypeUint16, Value: port},
+	}
+	packet, err := MakePacket(PrED2K, pack)
+	if err != nil {
+		return nil, err
+	}
+	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
+}
+
 // capWireSources truncates to what a single-byte count can describe. Applied at
 // the wire layer as well as in the engines so the count and the record count
 // cannot disagree, whichever engine supplied the slice.

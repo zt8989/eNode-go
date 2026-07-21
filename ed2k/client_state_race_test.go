@@ -65,6 +65,14 @@ func TestConcurrentLoginAndCallbackHaveNoRace(t *testing.T) {
 			peer := newTCPClient(rt, &mockConn{}, false)
 			hash := bytes.Repeat([]byte{byte(0x10 + n)}, 16)
 			peer.handlePacket(loginPacket(t, hash, 0, uint16(5000+n)))
+			// Promote the peer to a HighID so handleCallbackRequest takes the
+			// classic IPv4 branch and writes to the *target's* socket cross-
+			// goroutine — the write this test exists to stress. Without this a
+			// LowID requester now hits sendCallbackFailed on its own conn instead.
+			peer.infoMu.Lock()
+			peer.info.LowID = false
+			peer.info.IPv4 = uint32(0x0100007f)
+			peer.infoMu.Unlock()
 			for {
 				select {
 				case <-stop:

@@ -24,6 +24,7 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | server→client, TCP |
 | `OP_GLOBGETSOURCES_IPV6` | `0xA5` | client→server, UDP |
 | `OP_GLOBFOUNDSOURCES_IPV6` | `0xA6` | server→client, UDP |
+| `OP_CALLBACKREQUESTED_IPV6` | `0x26` | server→client, TCP |
 
 **Byte order:** every 16-byte IPv6 field is the raw `in6_addr` in network byte
 order (big-endian, the order `inet_pton` produces and a textual `2001:db8::1`
@@ -91,9 +92,9 @@ IPv6 to put in `0xAE`. The server reads `CT_SERVER_FLAGS` as a uint32.
 
 An ed2k ClientID is 32 bits and a HighID *is* the packed IPv4, so a client with no
 usable IPv4 can never get a HighID. eNode-go assigns such a client a **LowID**
-unconditionally and reaches it via its IPv6 (published as a v6 source), not via a
-callback (callbacks remain IPv4-only). A dual-stack client with a routable IPv4
-still gets a HighID as usual.
+unconditionally and reaches it via its IPv6 (published as a v6 source). Such a
+client can also drive and receive **IPv6 LowID callbacks** (§7). A dual-stack
+client with a routable IPv4 still gets a HighID as usual.
 
 ---
 
@@ -197,8 +198,54 @@ v6-only source (`clientId == 0xFFFFFFFF`) is reachable only over IPv6.
 
 ## 6. What the server does not do
 
-- **No IPv6 LowID callbacks.** `OP_CALLBACKREQUESTED` stays IPv4-only. Reach a
-  v6-only source directly over its IPv6 instead.
 - **No IPv6 in NAT traversal.** The `PR_NAT (0xF1)` protocol is IPv4-only; a
   globally-addressable IPv6 peer does not need it.
 - **No IPv6 in `OP_SERVERLIST`.** Advertised peer servers are IPv4.
+
+---
+
+## 7. IPv6 LowID callbacks
+
+A LowID callback lets a firewalled **target** be reached: a **requester** asks the
+server to tell the target to connect *back* to the requester. Classic
+`OP_CALLBACKREQUESTED (0x35)` carries `uint32 ip + uint16 port` (the requester's
+IPv4), so it only works when the requester is directly reachable over IPv4 (HighID).
+A requester whose only routable address is IPv6 — v6-only, or LowID over IPv4 —
+could not be called back at all. eNode-go now closes that gap.
+
+### Request (unchanged)
+
+The requester still sends `OP_CALLBACKREQUEST (0x1C)` `<target LowID:uint32>`. The
+LowID is the server-assigned 32-bit id; it is family-agnostic and needs no change.
+
+### The server's family choice
+
+The server picks the callback family from the **requester's** reachability, as two
+independent checks:
+
+1. If the requester has a HighID (a routable IPv4), the server sends the classic
+   `OP_CALLBACKREQUESTED (0x35)` — byte-identical to before.
+2. Otherwise (requester LowID over IPv4, or IPv4 `0`), if the requester has a
+   **reachable public IPv6** and the target session is **v6-capable** (§2), the
+   server sends `OP_CALLBACKREQUESTED_IPV6 (0x26)` so the target calls back over
+   IPv6.
+3. If neither applies, the server sends `OP_CALLBACKFAILED (0x36)`.
+
+### `OP_CALLBACKREQUESTED_IPV6 (0x26)` — server → target
+
+```
+uint8      opcode = 0x26
+uint8[16]  ipv6        // the requester's public IPv6, network byte order
+uint16     port        // the requester's port (LE)
+```
+
+It is the classic packet widened from a 4-byte IPv4 to a 16-byte `in6_addr`, with
+**no** crypt-options/userhash trailer (eNode-go's classic `0x35` emitter has none
+either). On receipt, build the callback client from the 16 IPv6 bytes and the port
+and connect to it over IPv6, exactly as you would `TryToConnect()` on the IPv4
+address from `0x35`.
+
+> **Capability gate.** The server only sends `0x26` to a session it knows is
+> v6-capable (connected over IPv6, or sent `CT_MOD_IP_V6` at login — §2). A client
+> that is not v6-capable never receives it, and a legacy client drops the unknown
+> `0x26` opcode in its `ProcessPacket` default, so there is no desync risk.
