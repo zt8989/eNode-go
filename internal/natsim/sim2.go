@@ -1,3 +1,9 @@
+// sim2 simulates the initiator/caller side of eNode's UDP NAT-traversal hole-punch
+// (ed2k/nattraversal.go): register, send OP_NAT_SYNC2 to pair with the target hash,
+// receive the peer's public endpoint via OP_NAT_SYNC, then punch with PING/PONG. It
+// differs from the TCP low-ID callback (OP_CALLBACKREQUEST, server_runtime.go), where
+// the firewalled peer dials out over TCP; hole-punching works when both ends are NAT'd.
+
 package natsim
 
 import (

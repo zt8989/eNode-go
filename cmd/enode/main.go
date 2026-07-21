@@ -252,6 +252,10 @@ func run(ctx context.Context, configPath string) error {
 		natConn, err := ed2k.RunUDPServer(ed2k.UDPServerConfig{
 			Address: cfg.Address,
 			Port:    cfg.NAT.Port,
+			// Bind the dual-stack wildcard when IPv6 is enabled, matching the main
+			// UDP/TCP listeners; otherwise the NAT socket stays IPv4-only while the
+			// rest of the server serves both families.
+			DualStack: dualStack,
 		}, udpMainHandler)
 		if err != nil {
 			return fmt.Errorf("nat traversal udp server failed: %w", err)

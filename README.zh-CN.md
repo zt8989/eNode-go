@@ -60,6 +60,10 @@ testUrls:                    # dynIp=auto 时依次请求，取第一个可用 I
 messageLowID: "You have LowID."   # LowID 登录提示
 messageLogin: "Welcome to eNode!" # 普通登录提示
 
+servers: []                  # OP_SERVERLIST 中通告的其他服务器（不含本机）；默认为空
+  # - ip: "192.0.2.10"
+  #   port: 4661
+
 noAssert: false              # 兼容历史行为的断言开关（默认关闭）
 logLevel: "debug"            # 日志级别：debug|info|warn|error
 logFile: "logs/enode.log"    # 日志文件路径
@@ -92,8 +96,24 @@ natTraversal:
   port: 2004                 # NAT 穿透 UDP 端口
   registrationTTLSeconds: 30 # NAT 注册表项有效期（秒）
 
+ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为
+  enabled: true              # 接受 IPv6 登录并启用 v6 代码路径（默认 true）
+  address: ""                # 显式 IPv6 绑定地址；"" 时由顶层 address 决定
+  dynIp6: "auto"             # 对外 IPv6，"auto" 通过 testUrls6 探测，"" 则不通告
+  publishSources: true       # 发布 IPv6 源并支持 OP_*_IPV6 操作码
+  probeReachability: true    # 发布前先验证客户端 IPv6 可达
+  testUrls6:                 # 仅 dynIp6=auto 时使用，取第一个可用 IPv6
+    - "https://v6.ident.me"
+    - "https://api64.ipify.org"
+
 storage:
   engine: memory             # 存储引擎：memory | mysql | mongodb
+  cleanup:                   # 过期清理离线客户端及其源
+    enabled: true            # 开启周期性清理
+    staleAfterHours: 24      # 离线多久后移除客户端
+    intervalMinutes: 60      # 清理扫描的执行间隔
+    keepZeroSourceFiles: true # 保留最后一个源离线的文件（默认 true）
+    batchSize: 1000          # 每批删除的行数
   mysql:
     host: localhost          # MySQL 主机
     port: 3306               # MySQL 端口
@@ -102,6 +122,8 @@ storage:
     database: enode          # MySQL 数据库
     connections: 8           # MySQL 连接池上限
     deadlockDelay: 100       # 死锁重试等待（毫秒）
+    schemaFile: misc/enode.sql # 首次连接且表缺失时执行的 DDL
+    dialect: mariadb         # 全文检索：mariadb（可移植）| mysql（ngram 子串）
   mongodb:
     host: 127.0.0.1          # MongoDB 主机（uri 为空时使用）
     port: 27017              # MongoDB 端口（uri 为空时使用）

@@ -13,6 +13,12 @@ testUrls:
 messageLowID: "You have LowID."
 messageLogin: "Welcome to eNode!"
 
+# Peer servers advertised to clients in OP_SERVERLIST (never this server itself —
+# its own identity travels in OP_SERVERIDENT). Empty is valid and the default.
+servers: []
+  # - ip: "192.0.2.10"
+  #   port: 4661
+
 noAssert: false
 logLevel: "debug"
 logFile: "logs/enode.log"
@@ -95,6 +101,8 @@ storage:
     pass: password
     connections: 8
     deadlockDelay: 100
+    # DDL applied on first connect when the tables are missing; relative to the working directory.
+    schemaFile: misc/enode.sql
     # Full-text search strategy: mariadb (word-prefix, portable) | mysql (ngram substring, MySQL 5.7.6+).
     dialect: mariadb
   mongodb:

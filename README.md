@@ -66,6 +66,10 @@ testUrls:                    # Used only when dynIp=auto, first valid IPv4 wins
 messageLowID: "You have LowID."   # Message sent to LowID clients
 messageLogin: "Welcome to eNode!" # Message sent on login
 
+servers: []                  # Peer servers advertised in OP_SERVERLIST; empty is the default
+  # - ip: "192.0.2.10"
+  #   port: 4661
+
 noAssert: false              # Compatibility assert switch (normally false)
 logLevel: "debug"            # Log level: debug|info|warn|error
 logFile: "logs/enode.log"    # Log file path
@@ -98,8 +102,24 @@ natTraversal:
   port: 2004                 # NAT traversal UDP port
   registrationTTLSeconds: 30 # NAT registry TTL (seconds)
 
+ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-only behaviour
+  enabled: true              # Accept IPv6 logins and run the v6 code paths (default true)
+  address: ""                # Explicit IPv6 bind; "" lets the top-level address govern
+  dynIp6: "auto"             # Public IPv6, "auto" to resolve via testUrls6, or "" to not advertise
+  publishSources: true       # Emit the IPv6 sentinel and honour the OP_*_IPV6 opcodes
+  probeReachability: true    # Verify a client's IPv6 is reachable before publishing it
+  testUrls6:                 # Used only when dynIp6=auto, first valid IPv6 wins
+    - "https://v6.ident.me"
+    - "https://api64.ipify.org"
+
 storage:
   engine: memory             # Storage engine: memory | mysql | mongodb
+  cleanup:                   # Expire offline clients and their sources
+    enabled: true            # Turn the periodic cleanup on
+    staleAfterHours: 24      # Age after which an offline client is removed
+    intervalMinutes: 60      # How often the cleanup sweep runs
+    keepZeroSourceFiles: true # Keep files whose last source went offline (default true)
+    batchSize: 1000          # Rows deleted per sweep batch
   mysql:
     host: localhost          # MySQL host
     port: 3306               # MySQL port
@@ -108,6 +128,8 @@ storage:
     database: enode          # MySQL database
     connections: 8           # MySQL connection pool cap
     deadlockDelay: 100       # Deadlock retry delay (ms)
+    schemaFile: misc/enode.sql # DDL applied on first connect when tables are missing
+    dialect: mariadb         # Full-text search: mariadb (portable) | mysql (ngram substring)
   mongodb:
     host: 127.0.0.1          # MongoDB host (used when uri is empty)
     port: 27017              # MongoDB port (used when uri is empty)
