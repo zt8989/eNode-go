@@ -15,10 +15,30 @@ type LowIDClients struct {
 	clients     map[uint32]any
 }
 
-func NewLowIDClients(allowLowIDs bool) *LowIDClients {
+// lowIDCeiling is the top of the LowID space. The ed2k ID that flags a client as
+// firewalled must stay below 0x1000000 (24 bits), so 0xffffff is the hard max.
+const lowIDCeiling uint32 = 0xffffff
+
+// NewLowIDClients builds the allocator over the [min,max] range configured by
+// tcp.minLowID / tcp.maxLowID. The clamping lives here, not at the call site, so
+// an omitted config (0/0) can never produce a degenerate one-element range:
+//
+//   - min == 0            → 1   (0 is reserved: it is what "not a LowID" looks like)
+//   - max == 0 or > ceil  → 0xffffff
+//   - min > max           → the full 1..0xffffff range (a misconfiguration, not fatal)
+func NewLowIDClients(allowLowIDs bool, min, max uint32) *LowIDClients {
+	if min == 0 {
+		min = 1
+	}
+	if max == 0 || max > lowIDCeiling {
+		max = lowIDCeiling
+	}
+	if min > max {
+		min, max = 1, lowIDCeiling
+	}
 	return &LowIDClients{
-		min:         1,
-		max:         0xffffff,
+		min:         min,
+		max:         max,
 		allowLowIDs: allowLowIDs,
 		clients:     map[uint32]any{},
 	}

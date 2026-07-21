@@ -99,7 +99,7 @@ func buildSearchNode(expr *SearchExpr) whereNode {
 		args := make([]any, 0, len(terms))
 		for _, t := range terms {
 			parts = append(parts, "s.name LIKE ?")
-			args = append(args, "%"+t+"%")
+			args = append(args, "%"+escapeLike(t)+"%")
 		}
 		return whereNode{sql: "(" + strings.Join(parts, " AND ") + ")", args: args}
 	case SearchString:
@@ -299,6 +299,24 @@ func joinWhereNodes(left, right whereNode, op string) whereNode {
 func splitTerms(text string) []string {
 	return strings.Fields(strings.TrimSpace(text))
 }
+
+// escapeLike backslash-escapes the LIKE metacharacters % and _ (and the escape
+// character itself) so a search term matches them literally — the way the memory
+// engine (strings.Contains) and MongoDB (regexp.QuoteMeta) already do. Without
+// this the three engines disagree: `50%` is a wildcard on MySQL but a literal
+// elsewhere, the same class of cross-engine divergence as M9/C3.
+//
+// No explicit `ESCAPE` clause is emitted. LIKE's default escape character is the
+// backslash regardless of sql_mode (NO_BACKSLASH_ESCAPES governs string- and
+// identifier-literal parsing, not the LIKE operator, and these terms arrive as
+// bound parameters, not literals). An explicit `ESCAPE '\\'` would be
+// self-defeating — that clause is itself a string literal that NO_BACKSLASH_ESCAPES
+// turns into two backslashes, which is not a single escape character.
+func escapeLike(term string) string {
+	return likeEscaper.Replace(term)
+}
+
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 func fileExt(name string) string {
 	ext := filepath.Ext(name)

@@ -98,6 +98,8 @@ func run(ctx context.Context, configPath string) error {
 		}
 	}()
 
+	seedServers(engine, cfg.Servers)
+
 	if cfg.Storage.Cleanup.Enabled {
 		keepZeroSourceFiles := cfg.Storage.Cleanup.KeepZeroSourceFilesOrDefault()
 		stopStorageCleanup := storage.StartCleanup(
@@ -166,6 +168,8 @@ func run(ctx context.Context, configPath string) error {
 			DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
 			AllowLowIDs:       cfg.TCP.AllowLowIDs,
 			SupportCrypt:      cfg.SupportCrypt,
+			MinLowID:          cfg.TCP.MinLowID,
+			MaxLowID:          cfg.TCP.MaxLowID,
 		},
 		ed2k.UDPRuntimeConfig{
 			Name:        cfg.Name,
@@ -337,4 +341,23 @@ func serverIdentitySeed(advertisedIP, configuredAddress string) string {
 		return host
 	}
 	return configuredAddress
+}
+
+// seedServers loads the configured peer servers into storage so OP_SERVERLIST can
+// advertise them. This is the only caller of Engine.AddServer outside tests — the
+// list was permanently empty before. An entry with an unparseable IP is skipped
+// with a warning rather than aborting: BuildServerListPacket errors on the first
+// bad IP and sendServerList then drops the whole packet, so one typo would silence
+// the entire list. Empty config (the default) seeds nothing, unchanged.
+func seedServers(store storage.Engine, entries []config.ServerEntry) {
+	for _, e := range entries {
+		if _, err := ed2k.IPv4ToInt32LE(e.IP); err != nil {
+			logging.Warnf("skipping server list entry %q:%d: invalid IPv4", e.IP, e.Port)
+			continue
+		}
+		store.AddServer(storage.Server{IP: e.IP, Port: e.Port})
+	}
+	if n := store.ServersCount(); n > 0 {
+		logging.Infof("advertising %d server(s) in OP_SERVERLIST", n)
+	}
 }

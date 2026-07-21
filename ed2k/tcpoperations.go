@@ -78,11 +78,19 @@ func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []
 			PacketItem{Type: TypeUint16, Value: src.Port},
 		)
 		if withObfuSettings {
-			// OP_FOUNDSOURCES_OBFU requires one extra "obfuscation settings" byte per source.
-			// If user hash is present, set 0x80 and append 16-byte user hash.
-			obf := uint8(0)
-			if len(src.UserHash) == 16 {
-				obf = 0x80
+			// OP_FOUNDSOURCES_OBFU carries one "obfuscation settings" byte per source:
+			// bit 0x01 supports crypt, 0x02 requests, 0x04 requires (matching eMule's
+			// CreateSrcInfoPacket: (requires<<2)|(requests<<1)|(supports<<0)), and 0x80
+			// meaning a 16-byte user hash follows.
+			//
+			// The hash is tied to crypt capability, as eMule expects (PartFile.cpp
+			// AddSources warns when a hash is present for a source that isn't crypt
+			// capable): send it only when the source advertised at least one crypt bit.
+			// A non-crypt source therefore gets 0x00 and no hash — the requester used
+			// OP_GETSOURCES_OBFU but cannot reach that peer obfuscated anyway.
+			obf := src.CryptOptions & 0x07
+			if obf != 0 && len(src.UserHash) == 16 {
+				obf |= 0x80
 			}
 			pack = append(pack, PacketItem{Type: TypeUint8, Value: obf})
 			if obf&0x80 != 0 {

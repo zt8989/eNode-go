@@ -63,6 +63,18 @@ func (u *UDPCrypt) Decrypt(buffer []byte) []byte {
 	if err != nil {
 		return buffer
 	}
+	// Only the low nibble is the padding length (0..15); the high nibble is
+	// reserved and must be masked off. Then reject a packet whose remaining bytes
+	// cannot cover the padding — matching eMule's decryptReceivedServer, which does
+	// `byPadding[0] &= 0xf` and bails when `remaining <= padLen`
+	// (srchybrid/EncryptedDatagramSocket.cpp:404-415). At this point db.Remaining()
+	// equals eMule's `remaining` (datagram length minus the 8-byte crypt header).
+	// On rejection return the original buffer: its first byte is not PrED2K, so the
+	// dispatcher drops it, which is eMule's junk-passthrough behaviour.
+	padLength &= 0x0f
+	if db.Remaining() <= int(padLength) {
+		return buffer
+	}
 	_ = db.Get(int(padLength))
 	return db.Get()
 }

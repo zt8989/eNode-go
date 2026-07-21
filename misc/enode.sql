@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `id_ed2k` int(10) unsigned NOT NULL DEFAULT '0',
   `ipv4` int(10) unsigned NOT NULL DEFAULT '0',
   `port` smallint(5) unsigned NOT NULL DEFAULT '0',
+  -- eMule OP_FOUNDSOURCES_OBFU crypt options for this client: bit 0x01 supports,
+  -- 0x02 requests, 0x04 requires obfuscation. Parsed from the CT_SERVER_FLAGS
+  -- login tag and re-published per source.
+  `crypt_options` tinyint(1) unsigned NOT NULL DEFAULT '0',
   `time_login` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `online` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),

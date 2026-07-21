@@ -37,6 +37,12 @@ func RC4CreateKey(keyphrase []byte, drop bool) *RC4Key {
 	for i := 0; i < 256; i++ {
 		k.State[i] = byte(i)
 	}
+	// An empty keyphrase would index keyphrase[0] and divide by len(keyphrase)==0
+	// in the loop below and panic (JS produced NaN instead). Unreachable today, but
+	// a hostile or buggy caller must get an identity-permuted key, not a crash.
+	if len(keyphrase) == 0 {
+		return k
+	}
 	index1 := 0
 	index2 := 0
 	for i := 0; i < 256; i++ {
@@ -80,6 +86,14 @@ func Rand(n int) int {
 		return 0
 	}
 	return rand.Intn(n + 1)
+}
+
+// RandUint32 returns a random value across the full uint32 range. Used instead of
+// uint32(Rand(0xffffffff)): the constant 0xffffffff does not fit a 32-bit int, so
+// that expression fails to compile on GOARCH=386, and Rand's internal n+1 would
+// overflow there anyway. rand.Uint32 sidesteps both.
+func RandUint32() uint32 {
+	return rand.Uint32()
 }
 
 func RandBuf(length int) ([]byte, error) {

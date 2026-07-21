@@ -205,11 +205,15 @@ func (b *Buffer) GetString(length ...int) (string, error) {
 	} else {
 		l = length[0]
 	}
-	data := b.Get(l)
-	if data == nil && l != 0 {
+	// Bounds-check before Get. Get truncates to the bytes remaining, so a declared
+	// length past the end would otherwise return a silently truncated string with
+	// no error — a filename cut off at a TCP boundary that parses "successfully"
+	// corrupted. Every other getter returns ErrOutOfBounds on a short read; match
+	// them, so a lying length prefix aborts the parse (as with the M2/M11 hardening).
+	if l < 0 || b.Remaining() < l {
 		return "", ErrOutOfBounds
 	}
-	return string(data), nil
+	return string(b.Get(l)), nil
 }
 
 func (b *Buffer) PutString(s string) error {

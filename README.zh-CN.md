@@ -30,7 +30,7 @@
 
 ## NAT Traversal 传输截图
 
-![NAT traversal 传输截图](images/E35D333390376E311EA081CAD69D85D7.png)
+![NAT traversal 传输截图](docs/images/E35D333390376E311EA081CAD69D85D7.png)
 
 ## 配置
 

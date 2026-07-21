@@ -32,7 +32,7 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 
 ## NAT Traversal Transfer Screenshot
 
-![NAT traversal transfer screenshot](images/E35D333390376E311EA081CAD69D85D7.png)
+![NAT traversal transfer screenshot](docs/images/E35D333390376E311EA081CAD69D85D7.png)
 
 ## Configuration
 

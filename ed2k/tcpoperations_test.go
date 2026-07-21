@@ -86,20 +86,59 @@ func TestBuildSearchAndSources(t *testing.T) {
 		t.Fatalf("obfu and non-obfu ports differ: obfu=%02x%02x normal=%02x%02x",
 			fpObfu.Bytes()[27], fpObfu.Bytes()[28], fp.Bytes()[27], fp.Bytes()[28])
 	}
-	fpObfuHash, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
+	// N2: the user hash is tied to crypt capability. A source that carries a hash
+	// but advertised no crypt options must yield options byte 0x00 and NO hash — the
+	// old code emitted 0x80 + hash regardless of crypt, which is what this asserts
+	// against.
+	fpHashNoCrypt, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
 		ID: 11, Port: 22, UserHash: []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("input: obfu source hash-present crypt=0x00 -> options=0x%02x size=%d",
+		fpHashNoCrypt.Bytes()[29], len(fpHashNoCrypt.Bytes()))
+	if len(fpHashNoCrypt.Bytes()) != len(fpObfu.Bytes()) {
+		t.Fatalf("hash-without-crypt should carry no hash: size=%d want=%d", len(fpHashNoCrypt.Bytes()), len(fpObfu.Bytes()))
+	}
+	if fpHashNoCrypt.Bytes()[29] != 0x00 {
+		t.Fatalf("hash-without-crypt options mismatch: got=0x%02x want=0x00", fpHashNoCrypt.Bytes()[29])
+	}
+
+	// A crypt-capable source (0x01 supports) with a hash: options 0x81, hash follows.
+	fpObfuHash, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
+		ID: 11, Port: 22, CryptOptions: 0x01,
+		UserHash: []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: obfu source crypt=0x01 hash-present -> options=0x%02x size=%d",
+		fpObfuHash.Bytes()[29], len(fpObfuHash.Bytes()))
 	if len(fpObfuHash.Bytes()) != len(fpObfu.Bytes())+16 {
 		t.Fatalf("obfu-hash packet size mismatch: nohash=%d hash=%d", len(fpObfu.Bytes()), len(fpObfuHash.Bytes()))
 	}
-	if fpObfuHash.Bytes()[29] != 0x80 {
-		t.Fatalf("obfu-hash options mismatch: got=%d", fpObfuHash.Bytes()[29])
+	if fpObfuHash.Bytes()[29] != 0x81 {
+		t.Fatalf("obfu-hash options mismatch: got=0x%02x want=0x81", fpObfuHash.Bytes()[29])
 	}
 	if got := fpObfuHash.Bytes()[30:46]; len(got) != 16 || got[0] != 9 || got[15] != 9 {
 		t.Fatalf("obfu-hash userhash mismatch: %x", got)
+	}
+
+	// requests-crypt (0x02) but no hash available: options 0x02, no hash appended.
+	fpReqNoHash, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
+		ID: 11, Port: 22, CryptOptions: 0x02,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: obfu source crypt=0x02 no-hash -> options=0x%02x size=%d",
+		fpReqNoHash.Bytes()[29], len(fpReqNoHash.Bytes()))
+	if len(fpReqNoHash.Bytes()) != len(fpObfu.Bytes()) {
+		t.Fatalf("crypt-without-hash size mismatch: got=%d want=%d", len(fpReqNoHash.Bytes()), len(fpObfu.Bytes()))
+	}
+	if fpReqNoHash.Bytes()[29] != 0x02 {
+		t.Fatalf("crypt-without-hash options mismatch: got=0x%02x want=0x02", fpReqNoHash.Bytes()[29])
 	}
 
 	sp, err := BuildSearchResultPacket([]storage.File{{

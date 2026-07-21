@@ -149,19 +149,20 @@ func (m *MongoDBEngine) IsConnected(info ClientInfo) bool {
 	return err == nil && n > 0
 }
 
-func (m *MongoDBEngine) Connect(info ClientInfo) (int, error) {
+func (m *MongoDBEngine) Connect(info ClientInfo) (uint64, error) {
 	if err := m.ensureDB(); err != nil {
 		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	doc := bson.M{
-		"hash":       info.Hash,
-		"id_ed2k":    info.ID,
-		"ipv4":       info.IPv4,
-		"port":       info.Port,
-		"online":     true,
-		"time_login": time.Now(),
+		"hash":          info.Hash,
+		"id_ed2k":       info.ID,
+		"ipv4":          info.IPv4,
+		"port":          info.Port,
+		"crypt_options": int32(info.CryptOptions),
+		"online":        true,
+		"time_login":    time.Now(),
 	}
 	_, err := m.db.Collection("clients").UpdateOne(
 		ctx,
@@ -178,7 +179,7 @@ func (m *MongoDBEngine) Connect(info ClientInfo) (int, error) {
 	if err := m.db.Collection("clients").FindOne(ctx, bson.M{"hash": info.Hash}).Decode(&got); err != nil {
 		return 0, err
 	}
-	return int(got.IDEd2K), nil
+	return uint64(got.IDEd2K), nil
 }
 
 func (m *MongoDBEngine) Disconnect(info ClientInfo) {
@@ -423,12 +424,11 @@ func (m *MongoDBEngine) FindBySearch(expr *SearchExpr) []File {
 		filterExpr = rest // may be nil when the whole query was just that text leaf
 	}
 
-	var (
-		fullMatch bson.M
-		needsFile bool
-	)
+	var fullMatch bson.M
 	if filterExpr != nil {
-		fullMatch, needsFile = mongoFilter(filterExpr)
+		// needsFile is intentionally discarded: the join below is unconditional, so
+		// whether this particular filter references file.* no longer decides it.
+		fullMatch, _ = mongoFilter(filterExpr)
 		if fullMatch == nil {
 			logging.Errorf("mongodb search: unsupported search expression, dropping query")
 			return nil
@@ -451,28 +451,34 @@ func (m *MongoDBEngine) FindBySearch(expr *SearchExpr) []File {
 	if sourceMatch := mongoSourceConjunctFilter(filterExpr); sourceMatch != nil {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: sourceMatch}})
 	}
-	if needsFile {
-		pipeline = append(pipeline,
-			bson.D{{
-				Key: "$lookup", Value: bson.M{
-					"from": "files",
-					"let":  bson.M{"h": "$file_hash", "s": "$file_size"},
-					"pipeline": mongo.Pipeline{
-						bson.D{{Key: "$match", Value: bson.M{
-							"$expr": bson.M{
-								"$and": []bson.M{
-									{"$eq": []any{"$hash", "$$h"}},
-									{"$eq": []any{"$size", "$$s"}},
-								},
+	// Always join the files document. The denormalized counters live there
+	// (files.sources/completed/source_id/source_port), and every result row carries
+	// them, so the group below reads $file.* unconditionally. Gating this on
+	// "does the filter need file.*" left a plain text search with no $file at all,
+	// which is why every such result reported Sources:0 / Completed:0. $unwind
+	// without preserveNullAndEmptyArrays drops a source with no matching file —
+	// which cannot happen (AddFile upserts the file before the source) and matches
+	// the MySQL engine's INNER JOIN files.
+	pipeline = append(pipeline,
+		bson.D{{
+			Key: "$lookup", Value: bson.M{
+				"from": "files",
+				"let":  bson.M{"h": "$file_hash", "s": "$file_size"},
+				"pipeline": mongo.Pipeline{
+					bson.D{{Key: "$match", Value: bson.M{
+						"$expr": bson.M{
+							"$and": []bson.M{
+								{"$eq": []any{"$hash", "$$h"}},
+								{"$eq": []any{"$size", "$$s"}},
 							},
-						}}},
-					},
-					"as": "file",
+						},
+					}}},
 				},
-			}},
-			bson.D{{Key: "$unwind", Value: "$file"}},
-		)
-	}
+				"as": "file",
+			},
+		}},
+		bson.D{{Key: "$unwind", Value: "$file"}},
+	)
 	if fullMatch != nil {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: fullMatch}})
 	}
@@ -935,9 +941,10 @@ func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Sourc
 
 	var docs []struct {
 		Client struct {
-			IDEd2K uint32 `bson:"id_ed2k"`
-			Port   uint16 `bson:"port"`
-			Hash   []byte `bson:"hash"`
+			IDEd2K       uint32 `bson:"id_ed2k"`
+			Port         uint16 `bson:"port"`
+			Hash         []byte `bson:"hash"`
+			CryptOptions uint8  `bson:"crypt_options"`
 		} `bson:"client"`
 	}
 	if err := cur.All(ctx, &docs); err != nil {
@@ -947,9 +954,10 @@ func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Sourc
 	out := make([]Source, 0, len(docs))
 	for _, d := range docs {
 		out = append(out, Source{
-			ID:       d.Client.IDEd2K,
-			Port:     d.Client.Port,
-			UserHash: append([]byte(nil), d.Client.Hash...),
+			ID:           d.Client.IDEd2K,
+			Port:         d.Client.Port,
+			UserHash:     append([]byte(nil), d.Client.Hash...),
+			CryptOptions: d.Client.CryptOptions,
 		})
 	}
 	return out

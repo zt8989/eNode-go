@@ -17,9 +17,18 @@ type Config struct {
 	TestURLs     []string `yaml:"testUrls"`
 	MessageLowID string   `yaml:"messageLowID"`
 	MessageLogin string   `yaml:"messageLogin"`
-	NoAssert     bool     `yaml:"noAssert"`
-	LogLevel     string   `yaml:"logLevel"`
-	LogFile      string   `yaml:"logFile"`
+	// NoAssert is accepted for config compatibility with the Node original but is
+	// an intentional no-op: Go bounds-checks every slice/array access, so there is
+	// no assertion layer to disable. Kept so an existing YAML with the key loads.
+	NoAssert bool   `yaml:"noAssert"`
+	LogLevel string `yaml:"logLevel"`
+	LogFile  string `yaml:"logFile"`
+
+	// Servers seeds OP_SERVERLIST — the other servers this node advertises to
+	// clients (never itself; a server's own identity travels in OP_SERVERIDENT).
+	// Empty by default: an empty list is valid and correct, unlike the Node
+	// original's two hard-coded invalid placeholder IPs.
+	Servers []ServerEntry `yaml:"servers"`
 
 	SupportCrypt bool `yaml:"supportCrypt"`
 	RequestCrypt bool `yaml:"requestCrypt"`
@@ -32,6 +41,12 @@ type Config struct {
 	NAT NATConfig `yaml:"natTraversal"`
 
 	Storage StorageConfig `yaml:"storage"`
+}
+
+// ServerEntry is one advertised peer server in OP_SERVERLIST.
+type ServerEntry struct {
+	IP   string `yaml:"ip"`
+	Port uint16 `yaml:"port"`
 }
 
 type TCPConfig struct {
@@ -100,6 +115,9 @@ type MySQLConfig struct {
 	Pass          string `yaml:"pass"`
 	Connections   int    `yaml:"connections"`
 	DeadlockDelay int    `yaml:"deadlockDelay"`
+	// SchemaFile is the DDL applied on first connect when the tables are missing.
+	// Relative to the working directory; defaults to misc/enode.sql.
+	SchemaFile string `yaml:"schemaFile"`
 }
 
 type MongoDBConfig struct {
@@ -140,20 +158,25 @@ func setDefaults(cfg *Config) {
 			"https://checkip.amazonaws.com",
 		}
 	}
+	// Ports match the Node original (enode.config.js) and both shipped YAMLs:
+	// TCP 5555/5565 and UDP 5559/5569, preserving the original's tcp+4 relation.
+	// The port previously fell back to the classic eDonkey 4661/4662/4665/4666,
+	// which no config in the repo uses — so a YAML omitting the port keys bound
+	// different ports than every sample config.
 	if cfg.TCP.Port == 0 {
-		cfg.TCP.Port = 4661
+		cfg.TCP.Port = 5555
 	}
 	if cfg.TCP.PortObfuscated == 0 {
-		cfg.TCP.PortObfuscated = 4662
+		cfg.TCP.PortObfuscated = 5565
 	}
 	if cfg.TCP.DisconnectTimeout <= 0 {
 		cfg.TCP.DisconnectTimeout = 3600
 	}
 	if cfg.UDP.Port == 0 {
-		cfg.UDP.Port = 4665
+		cfg.UDP.Port = 5559
 	}
 	if cfg.UDP.PortObfuscated == 0 {
-		cfg.UDP.PortObfuscated = 4666
+		cfg.UDP.PortObfuscated = 5569
 	}
 	if cfg.NAT.Port == 0 {
 		cfg.NAT.Port = 2004
@@ -172,6 +195,9 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Storage.MySQL.Port == 0 {
 		cfg.Storage.MySQL.Port = 3306
+	}
+	if cfg.Storage.MySQL.SchemaFile == "" {
+		cfg.Storage.MySQL.SchemaFile = "misc/enode.sql"
 	}
 	if cfg.Storage.MongoDB.Port == 0 {
 		cfg.Storage.MongoDB.Port = 27017
@@ -194,6 +220,7 @@ func (c Config) StorageEngineConfig() storage.Config {
 		// deadlockDelay was parsed from YAML and then dropped here, so the option
 		// had no effect anywhere in the program.
 		DeadlockDelay: time.Duration(c.Storage.MySQL.DeadlockDelay) * time.Millisecond,
+		SchemaFile:    c.Storage.MySQL.SchemaFile,
 	}
 	mongoURI := c.Storage.MongoDB.URI
 	if mongoURI == "" {

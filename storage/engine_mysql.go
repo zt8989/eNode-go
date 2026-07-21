@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -32,6 +33,12 @@ type MySQLConfig struct {
 	DeadlockDelay time.Duration
 	// DeadlockRetries bounds those retries. Zero means the default below.
 	DeadlockRetries int
+	// SchemaFile is the path to the DDL applied on first connect when the tables
+	// are absent. Relative paths resolve against the process working directory,
+	// so the server (run from the project root) finds the default below; tests
+	// running from a subpackage should resolve it with tests.FixRelativeTestingPath.
+	// Empty means the default below.
+	SchemaFile string
 }
 
 type MySQLEngine struct {
@@ -59,8 +66,16 @@ func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {
 	if cfg.DeadlockRetries <= 0 {
 		cfg.DeadlockRetries = defaultDeadlockRetries
 	}
+	if cfg.SchemaFile == "" {
+		cfg.SchemaFile = defaultSchemaFile
+	}
 	return &MySQLEngine{cfg: cfg}, nil
 }
+
+// defaultSchemaFile is the DDL applied on first connect. Relative so a server
+// started from the project root (as documented) finds misc/enode.sql; it can be
+// overridden via config (storage.mysql.schemaFile) for other layouts.
+const defaultSchemaFile = "misc/enode.sql"
 
 const (
 	defaultDeadlockDelay   = 100 * time.Millisecond
@@ -109,6 +124,13 @@ func (m *MySQLEngine) Init() error {
 		_ = db.Close()
 		return err
 	}
+	// Create the schema on first connect. No migration support: this only runs on
+	// a fresh database (the clients table absent), so an existing deployment never
+	// reads the file, and a partially-created schema is left untouched.
+	if err := m.ensureSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE clients SET online = 0`); err != nil {
 		_ = db.Close()
 		return err
@@ -148,19 +170,19 @@ func (m *MySQLEngine) IsConnected(info ClientInfo) bool {
 	return err == nil
 }
 
-func (m *MySQLEngine) Connect(info ClientInfo) (int, error) {
+func (m *MySQLEngine) Connect(info ClientInfo) (uint64, error) {
 	if err := m.ensureDB(); err != nil {
 		return 0, err
 	}
 	_, err := m.db.Exec(
-		`INSERT INTO clients(hash, id_ed2k, ipv4, port, online) VALUES(?,?,?,?,1)
-		 ON DUPLICATE KEY UPDATE id_ed2k=VALUES(id_ed2k), ipv4=VALUES(ipv4), port=VALUES(port), online=1`,
-		info.Hash, info.ID, info.IPv4, info.Port,
+		`INSERT INTO clients(hash, id_ed2k, ipv4, port, crypt_options, online) VALUES(?,?,?,?,?,1)
+		 ON DUPLICATE KEY UPDATE id_ed2k=VALUES(id_ed2k), ipv4=VALUES(ipv4), port=VALUES(port), crypt_options=VALUES(crypt_options), online=1`,
+		info.Hash, info.ID, info.IPv4, info.Port, info.CryptOptions,
 	)
 	if err != nil {
 		return 0, err
 	}
-	var id int
+	var id uint64
 	if err := m.db.QueryRow(`SELECT id FROM clients WHERE hash = ? LIMIT 1`, info.Hash).Scan(&id); err != nil {
 		return 0, err
 	}
@@ -253,7 +275,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 		return nil
 	}
 	rows, err := m.db.Query(
-		`SELECT c.id_ed2k, c.port, c.hash
+		`SELECT c.id_ed2k, c.port, c.hash, c.crypt_options
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
@@ -270,7 +292,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 	var out []Source
 	for rows.Next() {
 		var s Source
-		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash); err == nil {
+		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash, &s.CryptOptions); err == nil {
 			out = append(out, s)
 		}
 	}
@@ -282,7 +304,7 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 		return nil
 	}
 	rows, err := m.db.Query(
-		`SELECT c.id_ed2k, c.port, c.hash
+		`SELECT c.id_ed2k, c.port, c.hash, c.crypt_options
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
@@ -299,7 +321,7 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 	var out []Source
 	for rows.Next() {
 		var s Source
-		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash); err == nil {
+		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash, &s.CryptOptions); err == nil {
 			out = append(out, s)
 		}
 	}
@@ -615,4 +637,44 @@ func boolToTinyInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ensureSchema applies the DDL file when the database has no clients table yet.
+// The presence check keys on that single anchor table rather than all three: a
+// fresh database has none, and anything past that is an operator-managed schema
+// we must not rewrite (there is no migration support by design).
+func (m *MySQLEngine) ensureSchema(ctx context.Context, db *sql.DB) error {
+	var n int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.tables
+		 WHERE table_schema = DATABASE() AND table_name = 'clients'`).Scan(&n)
+	if err != nil {
+		return fmt.Errorf("mysql schema check failed: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	return m.applySchema(ctx)
+}
+
+// applySchema reads the SchemaFile and executes it in one shot. It uses a
+// throwaway connection with multiStatements enabled — the file is a
+// multi-statement dump (CREATE TABLEs plus an ALTER for the foreign keys, with a
+// phpMyAdmin SET preamble) — so the option never touches the engine's normal
+// pool, whose queries are all single, parameterized statements.
+func (m *MySQLEngine) applySchema(ctx context.Context) error {
+	ddl, err := os.ReadFile(m.cfg.SchemaFile)
+	if err != nil {
+		return fmt.Errorf("mysql schema file %q unreadable (needed to create tables on first connect): %w", m.cfg.SchemaFile, err)
+	}
+	db, err := sql.Open("mysql", m.dsn()+"&multiStatements=true")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, string(ddl)); err != nil {
+		return fmt.Errorf("mysql apply schema from %q failed: %w", m.cfg.SchemaFile, err)
+	}
+	logging.Infof("mysql: created schema from %s", m.cfg.SchemaFile)
+	return nil
 }

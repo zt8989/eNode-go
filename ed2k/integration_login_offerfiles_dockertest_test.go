@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"enode/storage"
+	"enode/tests"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/ory/dockertest/v3"
@@ -60,18 +61,19 @@ func TestTCPLoginAndOfferFilesPersistToMySQL(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		if e = db.Ping(); e != nil {
-			return e
-		}
-		return applyMySQLSchemaForED2K(db)
+		return db.Ping()
 	}); err != nil {
 		t.Fatalf("mysql not ready: %v", err)
 	}
 	defer db.Close()
 
+	// Init creates the schema from the resolved relative path on first connect
+	// (this test runs from ed2k/, so FixRelativeTestingPath walks up to the module
+	// root); the raw db handle above is kept for the direct row assertions below.
 	engine, err := storage.NewMySQLEngine(storage.MySQLConfig{
 		Host: "localhost", Port: mustAtoiForED2KIntegration(port), User: "root", Pass: "root", Database: "enode",
 		MaxOpenConns: 4, MaxIdleConns: 2,
+		SchemaFile: tests.FixRelativeTestingPath("misc/enode.sql"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -267,68 +269,6 @@ func dispatchIncomingTCPPacket(t *testing.T, client *tcpClient, items []PacketIt
 	}
 
 	client.handlePacket(packet)
-}
-
-func applyMySQLSchemaForED2K(db *sql.DB) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS clients (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			hash BINARY(16) NOT NULL,
-			id_ed2k INT UNSIGNED NOT NULL DEFAULT 0,
-			ipv4 INT UNSIGNED NOT NULL DEFAULT 0,
-			port SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-			time_login TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-			online TINYINT(1) NOT NULL DEFAULT 0,
-			PRIMARY KEY (id),
-			UNIQUE KEY uniq_hash (hash),
-			KEY idx_id_ed2k (id_ed2k)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
-		`CREATE TABLE IF NOT EXISTS files (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			hash BINARY(16) NOT NULL,
-			size BIGINT NOT NULL DEFAULT 0,
-			time_creation TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			time_offer TIMESTAMP NULL DEFAULT NULL,
-			source_id INT UNSIGNED NOT NULL DEFAULT 0,
-			source_port SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-			sources INT NOT NULL DEFAULT 0,
-			completed INT NOT NULL DEFAULT 0,
-			PRIMARY KEY (id),
-			UNIQUE KEY uniq_hash_size (hash,size),
-			KEY idx_hash (hash),
-			KEY idx_size (size)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
-		`CREATE TABLE IF NOT EXISTS sources (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			id_file BIGINT UNSIGNED NOT NULL,
-			id_client BIGINT UNSIGNED NOT NULL,
-			name VARCHAR(255) NOT NULL DEFAULT '',
-			ext VARCHAR(8) NOT NULL DEFAULT '',
-			time_offer TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			type ENUM('Image','Audio','Video','Pro','Doc','') NOT NULL DEFAULT '',
-			rating TINYINT UNSIGNED NOT NULL DEFAULT 0,
-			title VARCHAR(128) NOT NULL DEFAULT '',
-			artist VARCHAR(128) NOT NULL DEFAULT '',
-			album VARCHAR(128) NOT NULL DEFAULT '',
-			length INT UNSIGNED NOT NULL DEFAULT 0,
-			bitrate INT UNSIGNED NOT NULL DEFAULT 0,
-			codec VARCHAR(32) NOT NULL DEFAULT '',
-			online TINYINT(1) NOT NULL DEFAULT 0,
-			complete TINYINT(1) NOT NULL DEFAULT 0,
-			PRIMARY KEY (id),
-			UNIQUE KEY uniq_file_client (id_file,id_client),
-			KEY idx_file (id_file),
-			KEY idx_client (id_client),
-			CONSTRAINT fk_sources_file FOREIGN KEY (id_file) REFERENCES files(id) ON DELETE CASCADE ON UPDATE CASCADE,
-			CONSTRAINT fk_sources_client FOREIGN KEY (id_client) REFERENCES clients(id) ON DELETE CASCADE ON UPDATE CASCADE
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
-	}
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func mustAtoiForED2KIntegration(s string) int {

@@ -13,18 +13,27 @@ import (
 const MaxWireSources = 255
 
 type ClientInfo struct {
-	ID      uint32
-	IPv4    uint32
-	Port    uint16
-	Hash    []byte
-	LowID   bool
-	StoreID int
+	ID    uint32
+	IPv4  uint32
+	Port  uint16
+	Hash  []byte
+	LowID bool
+	// StoreID is the storage primary key for this client (clients.id, a
+	// bigint unsigned), assigned by Connect. uint64 per the project's PK rule.
+	StoreID uint64
+	// CryptOptions holds the client's obfuscation capabilities as the eMule
+	// OP_FOUNDSOURCES_OBFU byte: 0x01 supports, 0x02 requests, 0x04 requires crypt.
+	// Parsed from the CT_SERVER_FLAGS login tag and re-published per source.
+	CryptOptions byte
 }
 
 type Source struct {
 	ID       uint32
 	Port     uint16
 	UserHash []byte
+	// CryptOptions mirrors ClientInfo.CryptOptions for the offering client, so
+	// BuildFoundSourcesObfuPacket can advertise the source's crypt support.
+	CryptOptions byte
 }
 
 type File struct {
@@ -51,7 +60,7 @@ type Server struct {
 
 type MemoryEngine struct {
 	mu           sync.RWMutex
-	nextClientID int
+	nextClientID uint64
 	clients      map[uint32]ClientInfo
 	// clientsByHash indexes clients by user hash so IsConnected can be answered
 	// on hash, as the MySQL and MongoDB engines do. The login path needs this:
@@ -101,7 +110,7 @@ func (m *MemoryEngine) IsConnected(info ClientInfo) bool {
 	return ok
 }
 
-func (m *MemoryEngine) Connect(info ClientInfo) (int, error) {
+func (m *MemoryEngine) Connect(info ClientInfo) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nextClientID++
@@ -190,12 +199,14 @@ func (m *MemoryEngine) AddFile(file File, clientInfo ClientInfo) {
 	defer m.mu.Unlock()
 	k := hashKey(file.Hash)
 	m.files[k] = file
-	src := Source{ID: clientInfo.ID, Port: clientInfo.Port, UserHash: append([]byte(nil), clientInfo.Hash...)}
+	src := Source{ID: clientInfo.ID, Port: clientInfo.Port, UserHash: append([]byte(nil), clientInfo.Hash...), CryptOptions: clientInfo.CryptOptions}
 	existing := m.sources[k]
 	for i, s := range existing {
 		if s.ID == src.ID && s.Port == src.Port {
-			// Refresh hash in case client hash changed/reconnected.
+			// Refresh hash and crypt options in case the client reconnected with
+			// changed obfuscation settings.
 			existing[i].UserHash = append([]byte(nil), src.UserHash...)
+			existing[i].CryptOptions = src.CryptOptions
 			m.sources[k] = existing
 			return
 		}

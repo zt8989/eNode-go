@@ -71,8 +71,9 @@ func TestFoundSourcesObfuSendsRealLowIDPort(t *testing.T) {
 	}
 }
 
-// Guard the rest of the obfu layout, which was correct and must stay so: one
-// options byte per source, plus a 16-byte user hash only when bit 0x80 is set.
+// Guard the rest of the obfu layout: one options byte per source, plus a 16-byte
+// user hash only when bit 0x80 is set — which the builder sets only for a
+// crypt-capable source (N2), tying the hash to advertised crypt support.
 func TestFoundSourcesObfuLayoutUnchanged(t *testing.T) {
 	fileHash := []byte("0123456789abcdef")
 	src := storage.Source{ID: 0x00ABCDEF, Port: 4662}
@@ -95,18 +96,21 @@ func TestFoundSourcesObfuLayoutUnchanged(t *testing.T) {
 		t.Fatalf("crypt options byte should be 0 with no user hash, got 0x%02x", got)
 	}
 
+	// A crypt-capable source (0x01 supports) with a user hash: the hash is appended
+	// and bit 0x80 joins the crypt bit, giving 0x81.
 	withHash, err := BuildFoundSourcesObfuPacket(fileHash, []storage.Source{{
-		ID: src.ID, Port: src.Port, UserHash: []byte("fedcba9876543210"),
+		ID: src.ID, Port: src.Port, CryptOptions: 0x01,
+		UserHash: []byte("fedcba9876543210"),
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("output: obfu with user hash=%d bytes", len(withHash.Bytes()))
+	t.Logf("output: obfu with crypt+user hash=%d bytes", len(withHash.Bytes()))
 	if len(withHash.Bytes()) != len(obfu.Bytes())+16 {
 		t.Fatalf("user hash should add 16 bytes: without=%d with=%d",
 			len(obfu.Bytes()), len(withHash.Bytes()))
 	}
-	if got := withHash.Bytes()[29]; got != 0x80 {
-		t.Fatalf("crypt options byte should set 0x80 with a user hash, got 0x%02x", got)
+	if got := withHash.Bytes()[29]; got != 0x81 {
+		t.Fatalf("crypt options byte should be 0x81 (supports|hash), got 0x%02x", got)
 	}
 }

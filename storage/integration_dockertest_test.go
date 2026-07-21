@@ -2,12 +2,13 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"sort"
 	"testing"
 	"time"
+
+	"enode/tests"
 
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
@@ -48,39 +49,29 @@ func TestMySQLEngineWithDockertest(t *testing.T) {
 	defer func() { _ = pool.Purge(resource) }()
 
 	port := resource.GetPort("3306/tcp")
-	dsn := fmt.Sprintf("root:root@tcp(localhost:%s)/enode?parseTime=true", port)
 
-	var db *sql.DB
-	pool.MaxWait = 2 * time.Minute
-	if err := pool.Retry(func() error {
-		var e error
-		db, e = sql.Open("mysql", dsn)
-		if e != nil {
-			return e
-		}
-		if e = db.Ping(); e != nil {
-			return e
-		}
-		return applyMySQLSchema(db)
-	}); err != nil {
-		t.Fatalf("mysql not ready: %v", err)
-	}
-	defer db.Close()
-
+	// Init creates the schema on first connect from the resolved relative path
+	// (tests run from storage/, so FixRelativeTestingPath walks up to the module
+	// root), so this test no longer hand-maintains a duplicate of misc/enode.sql.
 	engine, err := NewMySQLEngine(MySQLConfig{
 		Host: "localhost", Port: mustAtoi(port), User: "root", Pass: "root", Database: "enode",
 		MaxOpenConns: 4, MaxIdleConns: 2,
+		SchemaFile: tests.FixRelativeTestingPath("misc/enode.sql"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.Init(); err != nil {
-		t.Fatal(err)
+	pool.MaxWait = 2 * time.Minute
+	if err := pool.Retry(func() error {
+		return engine.Init()
+	}); err != nil {
+		t.Fatalf("mysql not ready: %v", err)
 	}
 	defer engine.Close()
 
 	client := ClientInfo{
 		ID: 101, IPv4: 0x0100007f, Port: 4662, Hash: []byte("0123456789abcdef"),
+		CryptOptions: 0x03, // supports|requests — must round-trip through crypt_options
 	}
 	storeID, err := engine.Connect(client)
 	if err != nil {
@@ -102,6 +93,12 @@ func TestMySQLEngineWithDockertest(t *testing.T) {
 	sources := engine.GetSources(file.Hash, file.Size)
 	if len(sources) == 0 {
 		t.Fatalf("expected sources for file")
+	}
+	// N2: the client's crypt options must survive Connect -> GetSources via the
+	// clients.crypt_options column. 0 here means the column was not read/written.
+	t.Logf("output: source CryptOptions=0x%02x", sources[0].CryptOptions)
+	if sources[0].CryptOptions != 0x03 {
+		t.Fatalf("crypt options not round-tripped: got 0x%02x, want 0x03", sources[0].CryptOptions)
 	}
 	found := engine.FindByNameContains("movie")
 	if len(found) == 0 {
@@ -151,6 +148,7 @@ func TestMongoEngineWithDockertest(t *testing.T) {
 
 	client := ClientInfo{
 		ID: 202, IPv4: 0x0100007f, Port: 4662, Hash: []byte("0123456789abcdef"),
+		CryptOptions: 0x03, // supports|requests — must round-trip through crypt_options
 	}
 	storeID, err := engine.Connect(client)
 	if err != nil {
@@ -172,6 +170,11 @@ func TestMongoEngineWithDockertest(t *testing.T) {
 	sources := engine.GetSources(file.Hash, file.Size)
 	if len(sources) == 0 {
 		t.Fatalf("expected sources for file")
+	}
+	// N2: crypt options must survive Connect -> GetSources via the client document.
+	t.Logf("output: source CryptOptions=0x%02x", sources[0].CryptOptions)
+	if sources[0].CryptOptions != 0x03 {
+		t.Fatalf("crypt options not round-tripped: got 0x%02x, want 0x03", sources[0].CryptOptions)
 	}
 	found := engine.FindByNameContains("track")
 	if len(found) == 0 {
@@ -335,77 +338,44 @@ func TestMongoFindBySearch(t *testing.T) {
 			}
 		})
 	}
-}
 
-// applyMySQLSchema builds the test schema.
-//
-// NOTE: this is a hand-maintained duplicate of misc/enode.sql, not a loader for
-// it, so a column or index added to the real schema is invisible here until it
-// is added below as well. That is how the (online, time_login) index came to be
-// missing from every integration run despite being present in misc/enode.sql.
-// Keep the two in step, or replace this with a parser for the real file.
-func applyMySQLSchema(db *sql.DB) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS clients (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			hash BINARY(16) NOT NULL,
-			id_ed2k INT UNSIGNED NOT NULL DEFAULT 0,
-			ipv4 INT UNSIGNED NOT NULL DEFAULT 0,
-			port SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-			time_login TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-			online TINYINT(1) NOT NULL DEFAULT 0,
-			PRIMARY KEY (id),
-			UNIQUE KEY uniq_hash (hash),
-			KEY idx_id_ed2k (id_ed2k),
-			KEY online_time_login (online,time_login)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
-		`CREATE TABLE IF NOT EXISTS files (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			hash BINARY(16) NOT NULL,
-			size BIGINT NOT NULL DEFAULT 0,
-			time_creation TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			time_offer TIMESTAMP NULL DEFAULT NULL,
-			source_id INT UNSIGNED NOT NULL DEFAULT 0,
-			source_port SMALLINT UNSIGNED NOT NULL DEFAULT 0,
-			sources INT NOT NULL DEFAULT 0,
-			completed INT NOT NULL DEFAULT 0,
-			PRIMARY KEY (id),
-			UNIQUE KEY uniq_hash_size (hash,size),
-			KEY idx_hash (hash),
-			KEY idx_size (size)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
-		`CREATE TABLE IF NOT EXISTS sources (
-			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-			id_file BIGINT UNSIGNED NOT NULL,
-			id_client BIGINT UNSIGNED NOT NULL,
-			name VARCHAR(255) NOT NULL DEFAULT '',
-			ext VARCHAR(8) NOT NULL DEFAULT '',
-			time_offer TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			type ENUM('Image','Audio','Video','Pro','Doc','') NOT NULL DEFAULT '',
-			rating TINYINT UNSIGNED NOT NULL DEFAULT 0,
-			title VARCHAR(128) NOT NULL DEFAULT '',
-			artist VARCHAR(128) NOT NULL DEFAULT '',
-			album VARCHAR(128) NOT NULL DEFAULT '',
-			length INT UNSIGNED NOT NULL DEFAULT 0,
-			bitrate INT UNSIGNED NOT NULL DEFAULT 0,
-			codec VARCHAR(32) NOT NULL DEFAULT '',
-			online TINYINT(1) NOT NULL DEFAULT 0,
-			complete TINYINT(1) NOT NULL DEFAULT 0,
-			PRIMARY KEY (id),
-			UNIQUE KEY uniq_file_client (id_file,id_client),
-			KEY idx_file (id_file),
-			KEY idx_client (id_client),
-			KEY online_time_offer (online,time_offer),
-			CONSTRAINT fk_sources_file FOREIGN KEY (id_file) REFERENCES files(id) ON DELETE CASCADE ON UPDATE CASCADE,
-			CONSTRAINT fk_sources_client FOREIGN KEY (id_client) REFERENCES clients(id) ON DELETE CASCADE ON UPDATE CASCADE
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
-	}
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
-			return err
+	// N1 regression: a plain text search must report the true (denormalized) source
+	// count, not 0. FindBySearch used to only $lookup the files document when the
+	// filter referenced file.* (a sources/complete threshold); a plain text search
+	// took no lookup, so the $group read $file.sources from a source document that
+	// has no such field and every result decoded Sources:0 / Completed:0. Seed one
+	// file offered by three distinct clients and assert the count survives.
+	//
+	// Run last, after the exact-name cases above, so the extra file does not perturb
+	// their assertions.
+	t.Run("reports true source count", func(t *testing.T) {
+		shared := File{Hash: []byte("shared1234567890"), Name: "zzqxword clip", Size: 111, Type: "Pro", Completed: 1}
+		for i := 0; i < 3; i++ {
+			extra := ClientInfo{
+				ID: uint32(400 + i), IPv4: 0x0100007f, Port: uint16(5000 + i),
+				Hash: []byte{byte('A' + i), '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'},
+			}
+			sid, err := engine.Connect(extra)
+			if err != nil {
+				t.Fatal(err)
+			}
+			extra.StoreID = sid
+			engine.AddFile(shared, extra)
 		}
-	}
-	return nil
+
+		got := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: "zzqxword"})
+		t.Logf("input: one file offered by 3 distinct clients, plain text search %q", "zzqxword")
+		if len(got) != 1 {
+			t.Fatalf("expected 1 file, got %d", len(got))
+		}
+		t.Logf("output: Sources=%d Completed=%d", got[0].Sources, got[0].Completed)
+		if got[0].Sources != 3 {
+			t.Fatalf("Sources=%d, want 3 — the denormalized count must survive a text search", got[0].Sources)
+		}
+		if got[0].Completed != 3 {
+			t.Fatalf("Completed=%d, want 3", got[0].Completed)
+		}
+	})
 }
 
 func mustAtoi(s string) int {

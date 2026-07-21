@@ -16,7 +16,7 @@ type Engine interface {
 	Close() error
 	ClientsCount() int
 	IsConnected(ClientInfo) bool
-	Connect(ClientInfo) (int, error)
+	Connect(ClientInfo) (uint64, error)
 	Disconnect(ClientInfo)
 	FilesCount() int
 	AddFile(File, ClientInfo)

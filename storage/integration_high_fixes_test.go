@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"enode/tests"
+
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -50,18 +52,18 @@ func startMySQL(t *testing.T, database string) (*MySQLEngine, *sql.DB) {
 		if e != nil {
 			return e
 		}
-		if e = db.Ping(); e != nil {
-			return e
-		}
-		return applyMySQLSchema(db)
+		return db.Ping()
 	}); err != nil {
 		t.Fatalf("mysql not ready: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	// Init creates the schema from the resolved relative path on first connect, so
+	// the raw db handle above stays for the direct assertions these tests make.
 	engine, err := NewMySQLEngine(MySQLConfig{
 		Host: "localhost", Port: mustAtoi(port), User: "root", Pass: "root", Database: database,
 		MaxOpenConns: 4, MaxIdleConns: 2,
+		SchemaFile: tests.FixRelativeTestingPath("misc/enode.sql"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +197,41 @@ func TestMySQLFindBySearch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMySQLFindBySearchEscapesWildcards pins L13 end to end: a % in a search term
+// must match a literal %, the way the memory and Mongo engines already do — not act
+// as a SQL wildcard. Against the pre-fix build `LIKE '%a%b%'` matches both "a%b"
+// and "aXb"; with escaping only the literal "a%b" matches.
+func TestMySQLFindBySearchEscapesWildcards(t *testing.T) {
+	requireIntegration(t)
+	engine, _ := startMySQL(t, "enode")
+
+	client := ClientInfo{ID: 601, IPv4: 0x0100007f, Port: 4662, Hash: []byte("0123456789abcdef")}
+	storeID, err := engine.Connect(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.StoreID = storeID
+
+	seed := []File{
+		{Hash: []byte("dddddddddddddddd"), Name: "a%b", Size: 100, Type: "Doc"},
+		{Hash: []byte("eeeeeeeeeeeeeeee"), Name: "aXb", Size: 200, Type: "Doc"},
+	}
+	for _, f := range seed {
+		engine.AddFile(f, client)
+		t.Logf("input: seeded %q", f.Name)
+	}
+
+	got := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: "a%b"})
+	var names []string
+	for _, f := range got {
+		names = append(names, f.Name)
+	}
+	t.Logf("output: search %q → %d result(s) %v", "a%b", len(got), names)
+	if len(got) != 1 || names[0] != "a%b" {
+		t.Fatalf("got %v, want exactly [\"a%%b\"] — %% must be a literal, not a wildcard", names)
 	}
 }
 

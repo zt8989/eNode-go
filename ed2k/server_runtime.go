@@ -37,6 +37,10 @@ type TCPRuntimeConfig struct {
 	CounterCacheTTL time.Duration
 	AllowLowIDs     bool
 	SupportCrypt    bool
+	// MinLowID and MaxLowID bound the LowID allocation range (tcp.minLowID /
+	// tcp.maxLowID). Zero means "use the default", resolved in NewLowIDClients.
+	MinLowID uint32
+	MaxLowID uint32
 }
 
 type UDPRuntimeConfig struct {
@@ -74,7 +78,7 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 		TCP:      tcp,
 		UDP:      udp,
 		Storage:  store,
-		LowIDs:   NewLowIDClients(tcp.AllowLowIDs),
+		LowIDs:   NewLowIDClients(tcp.AllowLowIDs, tcp.MinLowID, tcp.MaxLowID),
 		counters: newCounterCache(store, tcp.CounterCacheTTL),
 	}
 }
@@ -467,6 +471,9 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	c.info.Hash = req.Hash
 	c.info.ID = req.ID
 	c.info.Port = req.Port
+	// Record the client's obfuscation capabilities so OP_FOUNDSOURCES_OBFU can
+	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
+	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	ipv4, port := c.info.IPv4, c.info.Port
 	c.infoMu.Unlock()
 
@@ -1125,7 +1132,7 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool) (bool, 
 		if err != nil {
 			return false, err
 		}
-		handshake, err := cli.BuildHandshake(RandProtocol(), uint32(Rand(0xffffffff)), pad)
+		handshake, err := cli.BuildHandshake(RandProtocol(), RandUint32(), pad)
 		if err != nil {
 			return false, err
 		}
@@ -1515,4 +1522,40 @@ func formatSearchExpr(expr *storage.SearchExpr) string {
 	default:
 		return fmt.Sprintf("UNKNOWN(kind=%d)", expr.Kind)
 	}
+}
+
+// loginFlags returns the CT_SERVER_FLAGS capability bitmask (tag "flags",
+// code 0x20) from an OP_LOGINREQUEST tag set, or 0 if the client sent none.
+// eMule packs its zlib/unicode/large-file and crypt capabilities here
+// (srchybrid/ServerConnect.cpp). Integer tags decode to uint64; truncating to
+// uint32 keeps every real flag bit — saturating (as tagUint32 does for magnitude
+// fields) would be wrong for a bitmask, setting bits the client never advertised.
+func loginFlags(tags []NamedTag) uint32 {
+	for _, t := range tags {
+		if t.Name != "flags" {
+			continue
+		}
+		if v, ok := t.Value.(uint64); ok {
+			return uint32(v)
+		}
+		return 0
+	}
+	return 0
+}
+
+// cryptOptionsFromLoginFlags maps the login capability bits to the per-source
+// OP_FOUNDSOURCES_OBFU options byte: 0x01 supports, 0x02 requests, 0x04 requires
+// obfuscation (srchybrid/ServerSocket.cpp:558-560).
+func cryptOptionsFromLoginFlags(flags uint32) byte {
+	var b byte
+	if flags&FlagSupportCrypt != 0 {
+		b |= 0x01
+	}
+	if flags&FlagRequestCrypt != 0 {
+		b |= 0x02
+	}
+	if flags&FlagRequireCrypt != 0 {
+		b |= 0x04
+	}
+	return b
 }
