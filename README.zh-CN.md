@@ -81,11 +81,11 @@ tcp:
   maxLowID: 16777215         # LowID 分配最大值
 
 udp:
-  port: 5559                 # UDP 主端口
-  portObfuscated: 5569       # UDP 混淆端口
+  port: 5559                 # UDP 主端口（tcp.port + 4）
+  portObfuscated: 5567       # UDP 混淆端口；须为 tcp.port + 12 才能完成 crypt-ping（见 docs/server-udp-crypt-ping.md）
   getSources: true           # 允许 UDP 来源查询
   getFiles: true             # 允许 UDP 文件查询
-  serverKey: 305419896       # UDP 混淆/握手相关 server key
+  serverKey: 305419896       # 服务端密钥种子；每个客户端的 UDP 混淆密钥由该种子 + 客户端 IP 派生（见 docs/server-udp-crypt-ping.md）
 
 natTraversal:
   enabled: true              # 是否启用 NAT 穿透服务

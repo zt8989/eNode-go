@@ -35,15 +35,43 @@ tcp:
 
 udp:
   port: 5559
-  portObfuscated: 5569
+  # tcp.port + 12: the port eMule hardwires for the server-UDP crypt-ping and the
+  # only source port it accepts the reply from on first contact. See
+  # docs/server-udp-crypt-ping.md.
+  portObfuscated: 5567
   getSources: true
   getFiles: true
+  # Server-wide secret: each client's UDP obfuscation key is derived from this
+  # seed + the client's IP (not sent verbatim). See docs/server-udp-crypt-ping.md.
   serverKey: 305419896
 
 natTraversal:
   enabled: true
   port: 2004
   registrationTTLSeconds: 30
+
+# IPv6 dual-stack support. When enabled (the default), the TCP/UDP listeners bind
+# the dual-stack wildcard (an empty top-level `address`), the server accepts IPv6
+# client logins, records each client's IPv6 and its verified reachability, and
+# publishes IPv6 sources to clients that opt in. Set enabled: false for the exact
+# pre-IPv6 IPv4-only behaviour. An explicit IPv4 `address` (e.g. 0.0.0.0) also
+# keeps the server IPv4-only.
+ipv6:
+  enabled: true
+  address: ""            # explicit v6 bind; "" lets the top-level address govern
+  dynIp6: "auto"         # server's public IPv6, or "auto", or "" to not advertise one
+  publishSources: true   # emit the IPv6 sentinel and honour the OP_*_IPV6 opcodes
+  probeReachability: true # verify a client's IPv6 is reachable before publishing it
+  # Resolved only when dynIp6 is "auto". Literal-IP endpoints first (they pin the
+  # family), then v6-only hosts, then dual-stack hosts. Falls back to a local
+  # global-scope interface address if all fail.
+  testUrls6:
+    - "https://[2606:4700:4700::1111]/cdn-cgi/trace"
+    - "https://v6.ident.me"
+    - "https://ipv6.icanhazip.com"
+    - "https://api64.ipify.org"
+    - "https://www.cloudflare.com/cdn-cgi/trace"
+    - "https://6.ipw.cn"
 
 storage:
   engine: memory
@@ -67,6 +95,8 @@ storage:
     pass: password
     connections: 8
     deadlockDelay: 100
+    # Full-text search strategy: mariadb (word-prefix, portable) | mysql (ngram substring, MySQL 5.7.6+).
+    dialect: mariadb
   mongodb:
     host: 127.0.0.1
     port: 27017

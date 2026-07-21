@@ -121,9 +121,13 @@ func (c *Client) Decrypt(data []byte) ([]byte, bool, error) {
 }
 
 func (c *Client) BuildHelloPacket() (*Buffer, error) {
+	// The hello's own-IP field is informational to the probe target and is 0 when
+	// the bind address is not a dotted-quad IPv4 — e.g. the dual-stack wildcard ""
+	// or an IPv6 bind. Erroring here would break the reachability probe from a
+	// v6-only or wildcard bind; eMule likewise sends 0 when it does not know its IP.
 	addr, err := IPv4ToInt32LE(c.Config.Address)
 	if err != nil {
-		return nil, err
+		addr = 0
 	}
 	tags := []Tag{
 		{Type: TypeString, Code: TagName, Data: ENodeName},

@@ -16,6 +16,10 @@ type UDPServerConfig struct {
 	GetSources   bool
 	GetFiles     bool
 	SupportCrypt bool
+	// DualStack selects the "udp" network (both families, honouring the bind
+	// address) instead of the IPv4-only "udp4", and drives the SRV_UDPFLG_IPV6
+	// advertisement. False reproduces the original behaviour exactly.
+	DualStack bool
 	// Workers and QueueSize bound the datagram handler pool. Zero means the
 	// defaults below.
 	Workers   int
@@ -39,6 +43,9 @@ func BuildUDPFlags(cfg UDPServerConfig) uint32 {
 	if cfg.SupportCrypt {
 		flags += FlagUdpObfusc + FlagTcpObfusc
 	}
+	if cfg.DualStack {
+		flags += FlagIPv6
+	}
 	return flags
 }
 
@@ -48,11 +55,12 @@ type udpDatagram struct {
 }
 
 func RunUDPServer(cfg UDPServerConfig, handler func([]byte, *net.UDPAddr, *net.UDPConn)) (*net.UDPConn, error) {
-	addr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.Address, strconv.Itoa(int(cfg.Port))))
+	network := udpNetwork(cfg.DualStack)
+	addr, err := net.ResolveUDPAddr(network, net.JoinHostPort(cfg.Address, strconv.Itoa(int(cfg.Port))))
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.ListenUDP("udp4", addr)
+	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -118,4 +126,13 @@ func udpPoolSize(cfg UDPServerConfig) (workers, queueSize int) {
 		queueSize = defaultUDPQueueSize
 	}
 	return workers, queueSize
+}
+
+// udpNetwork selects the listen network. "udp" binds dual-stack; "udp4" is the
+// original IPv4-only behaviour.
+func udpNetwork(dualStack bool) string {
+	if dualStack {
+		return "udp"
+	}
+	return "udp4"
 }

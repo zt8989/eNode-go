@@ -62,6 +62,7 @@ func DispatchNATPacket(
 	onRegister func(endpoint *net.UDPAddr, payload []byte),
 	onSync func(info SyncInfo, payload []byte),
 	onFailed func(payload []byte),
+	onNatPing func(payload []byte),
 ) bool {
 	opcode, payload, ok := DecodeNATPacket(raw)
 	if !ok {
@@ -83,6 +84,12 @@ func DispatchNATPacket(
 	case ed2k.OpNatFailed:
 		if onFailed != nil {
 			onFailed(payload)
+		}
+	case ed2k.OpNatPing:
+		// Keepalive ACK the server sends back for each accepted keepalive from a
+		// registered endpoint (see ed2k/nattraversal.go).
+		if onNatPing != nil {
+			onNatPing(payload)
 		}
 	}
 	return true

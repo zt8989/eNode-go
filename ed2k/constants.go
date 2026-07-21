@@ -40,6 +40,27 @@ const (
 	OpServerDescRes    uint8 = 0xa3
 )
 
+// IPv6 source-exchange opcodes (eNode-go extension).
+//
+// These carry the richer tag-block source format (§Format 2 of the IPv6 plan): a
+// client opts in by sending the request opcode, and the server answers in the
+// extended layout only to such a client. The values are virgin space above the
+// classic high-water marks (OP_GETSOURCES_OBFU 0x23, OP_SERVER_LIST_REQ2 0xa4)
+// and are free across every surveyed eMule tree, so a legacy client never emits
+// them and its ProcessPacket drops them with a harmless default case.
+const (
+	OpGetSourcesIPv6       uint8 = 0x24
+	OpFoundSourcesIPv6     uint8 = 0x25
+	OpGlobGetSourcesIPv6   uint8 = 0xa5
+	OpGlobFoundSourcesIPv6 uint8 = 0xa6
+)
+
+// SentinelIPv6ID is the ClientID value that marks an IPv6-only source inside the
+// classic OP_FOUNDSOURCES list: eMule reads 0xffffffff and then consumes 16 raw
+// in6_addr bytes that follow the port (and, for _OBFU, the crypt fields). Only
+// emitted to a session known to parse it — see the gating rule in the plan.
+const SentinelIPv6ID uint32 = 0xffffffff
+
 const (
 	OpNatSync       uint8 = 0xe1
 	OpNatPing       uint8 = 0xe2
@@ -60,8 +81,11 @@ const (
 	TypeString uint8 = 0x02
 	TypeUint32 uint8 = 0x03
 	TypeFloat  uint8 = 0x04
+	TypeBool   uint8 = 0x05
+	TypeBlob   uint8 = 0x07
 	TypeUint16 uint8 = 0x08
 	TypeUint8  uint8 = 0x09
+	TypeBsob   uint8 = 0x0a
 	TypeUint64 uint8 = 0x0b
 	TypeTags   uint8 = 0x0f
 )
@@ -123,6 +147,12 @@ const (
 	TagEmuleOptions1   uint8 = 0xfa
 	TagEmuleOptions2   uint8 = 0xfe
 	TagAuxPortsList    uint8 = 0x93
+	// IPv6 MOD tags, allocated by eMuleAI (Opcodes.h) and reused here verbatim.
+	// CT_MOD_IP_V6 carries a client's public IPv6 as a 16-byte HASH tag in
+	// OP_LOGINREQUEST; CT_MOD_SVR_IP_V6 carries the server's own IPv6 as a HASH tag
+	// in OP_SERVERIDENT.
+	TagModIPv6    uint8 = 0xae
+	TagModSvrIPv6 uint8 = 0xaf
 )
 
 const (
@@ -147,6 +177,11 @@ const (
 	FlagUdpExtSrc2    uint32 = 0x0020
 	FlagUdpObfusc     uint32 = 0x0200
 	FlagTcpObfusc     uint32 = 0x0400
+	// FlagIPv6 advertises IPv6 support in the SRV_TCPFLG_* / SRV_UDPFLG_* word.
+	// No eMule tree defines any server flag >= 0x1000; the only occupants are
+	// ed2kNET's unofficial 0x1000/0x2000 (chacha20/aes256), so 0x4000 is the first
+	// clean bit. Clients ignore unknown bits, so this is display/verify metadata.
+	FlagIPv6 uint32 = 0x4000
 )
 
 const (

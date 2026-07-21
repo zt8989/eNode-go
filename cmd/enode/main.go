@@ -85,6 +85,27 @@ func run(ctx context.Context, configPath string) error {
 	}
 	cfg.DynIP = resolvedDynIP
 
+	// The server's own public IPv6 (advertised via CT_MOD_SVR_IP_V6). Only resolved
+	// when IPv6 is enabled; failure is non-fatal, exactly like the IPv4 path.
+	var serverIPv6 []byte
+	if cfg.IPv6.EnabledOrDefault() {
+		resolvedV6, resolvedV6By, err := resolveDynIP6Value(cfg.IPv6.DynIP6, cfg.IPv6.TestURLs6, 0)
+		if err != nil {
+			logging.Warnf("dynIp6 auto resolve failed, continuing without a server IPv6: %v", err)
+		} else if resolvedV6 != "" {
+			if b, ok := ed2k.ParsePublicIPv6(resolvedV6); ok {
+				serverIPv6 = b[:]
+				if resolvedV6By != "" {
+					logging.Infof("dynIp6 resolved: %s (via=%s)", resolvedV6, resolvedV6By)
+				} else {
+					logging.Infof("server public IPv6: %s", resolvedV6)
+				}
+			} else {
+				logging.Warnf("dynIp6 value %q is not a usable public IPv6, ignoring", resolvedV6)
+			}
+		}
+	}
+
 	engine, err := storage.NewEngine(cfg.StorageEngineConfig())
 	if err != nil {
 		return fmt.Errorf("storage engine create failed: %w", err)
@@ -116,6 +137,7 @@ func run(ctx context.Context, configPath string) error {
 			cfg.Storage.Cleanup.IntervalMinutes, cfg.Storage.Cleanup.StaleAfterHours, keepZeroSourceFiles)
 	}
 
+	dualStack := cfg.IPv6.EnabledOrDefault()
 	tcpCfg := ed2k.TCPServerConfig{
 		Address:        cfg.Address,
 		Port:           cfg.TCP.Port,
@@ -125,6 +147,7 @@ func run(ctx context.Context, configPath string) error {
 		RequestCrypt:   cfg.RequestCrypt,
 		SupportCrypt:   cfg.SupportCrypt,
 		IPInLogin:      cfg.IPInLogin,
+		DualStack:      dualStack,
 	}
 	udpCfg := ed2k.UDPServerConfig{
 		Address:      cfg.Address,
@@ -132,6 +155,7 @@ func run(ctx context.Context, configPath string) error {
 		GetSources:   cfg.UDP.GetSources,
 		GetFiles:     cfg.UDP.GetFiles,
 		SupportCrypt: cfg.SupportCrypt,
+		DualStack:    dualStack,
 	}
 	tcpFlags := ed2k.BuildTCPFlags(tcpCfg)
 	udpFlags := ed2k.BuildUDPFlags(udpCfg)
@@ -170,6 +194,10 @@ func run(ctx context.Context, configPath string) error {
 			SupportCrypt:      cfg.SupportCrypt,
 			MinLowID:          cfg.TCP.MinLowID,
 			MaxLowID:          cfg.TCP.MaxLowID,
+			IPv6:              dualStack,
+			PublishV6Sources:  dualStack && cfg.IPv6.PublishSourcesOrDefault(),
+			ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
+			ServerIPv6:        serverIPv6,
 		},
 		ed2k.UDPRuntimeConfig{
 			Name:        cfg.Name,

@@ -28,6 +28,10 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - LowID callbacks
 - NAT traversal server (`OP_VC_NAT_HEADER`, `OP_NAT_REGISTER`, `OP_NAT_SYNC2`)
 - Files larger than 4 GiB
+- IPv6 dual-stack: accepts IPv6 client logins, records and verifies each client's
+  IPv6, and publishes IPv6 sources (eMuleAI/eMuleQt `CT_MOD_*` compatible). See
+  [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md).
+  Disable with `ipv6.enabled: false` for the exact IPv4-only behaviour.
 - Easy support for multiple storage engines
 
 ## NAT Traversal Transfer Screenshot
@@ -83,11 +87,11 @@ tcp:
   maxLowID: 16777215         # Maximum allocated LowID
 
 udp:
-  port: 5559                 # Main UDP port
-  portObfuscated: 5569       # Obfuscated UDP port
+  port: 5559                 # Main UDP port (tcp.port + 4, where eMule pings the plaintext stat)
+  portObfuscated: 5567       # Obfuscated UDP port; must be tcp.port + 12 for the crypt-ping (see docs/server-udp-crypt-ping.md)
   getSources: true           # Enable UDP source queries
   getFiles: true             # Enable UDP file queries
-  serverKey: 305419896       # Server key for UDP obfuscation/handshake
+  serverKey: 305419896       # Server-wide secret; per-client UDP obfuscation keys are derived from it + the client IP (see docs/server-udp-crypt-ping.md)
 
 natTraversal:
   enabled: true              # Enable NAT traversal service
@@ -158,7 +162,6 @@ This spins temporary MySQL and MongoDB containers, initializes schema/data, and 
 ## To Do
 
 - Better storage/indexing
-- IPv6 support ([unofficial draft for eD2K IPv6 extension](http://piratenpad.de/p/ed2kIPv6))
 
 ## Thanks To
 

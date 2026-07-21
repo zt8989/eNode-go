@@ -25,6 +25,12 @@ type ClientInfo struct {
 	// OP_FOUNDSOURCES_OBFU byte: 0x01 supports, 0x02 requests, 0x04 requires crypt.
 	// Parsed from the CT_SERVER_FLAGS login tag and re-published per source.
 	CryptOptions byte
+	// IPv6 is the client's public IPv6 as 16 network-order bytes, or nil. Learned
+	// from the CT_MOD_IP_V6 login tag or a v6-family connection.
+	IPv6 []byte
+	// IPv6Reachable is set once the server has verified the client answers on its
+	// IPv6:port. Only a reachable v6 is published as a source.
+	IPv6Reachable bool
 }
 
 type Source struct {
@@ -34,6 +40,10 @@ type Source struct {
 	// CryptOptions mirrors ClientInfo.CryptOptions for the offering client, so
 	// BuildFoundSourcesObfuPacket can advertise the source's crypt support.
 	CryptOptions byte
+	// IPv6 / IPv6Reachable mirror ClientInfo so the source builders can emit the
+	// IPv6 sentinel or tag-block form for a v6-reachable source.
+	IPv6          []byte
+	IPv6Reachable bool
 }
 
 type File struct {
@@ -199,14 +209,23 @@ func (m *MemoryEngine) AddFile(file File, clientInfo ClientInfo) {
 	defer m.mu.Unlock()
 	k := hashKey(file.Hash)
 	m.files[k] = file
-	src := Source{ID: clientInfo.ID, Port: clientInfo.Port, UserHash: append([]byte(nil), clientInfo.Hash...), CryptOptions: clientInfo.CryptOptions}
+	src := Source{
+		ID:            clientInfo.ID,
+		Port:          clientInfo.Port,
+		UserHash:      append([]byte(nil), clientInfo.Hash...),
+		CryptOptions:  clientInfo.CryptOptions,
+		IPv6:          append([]byte(nil), clientInfo.IPv6...),
+		IPv6Reachable: clientInfo.IPv6Reachable,
+	}
 	existing := m.sources[k]
 	for i, s := range existing {
 		if s.ID == src.ID && s.Port == src.Port {
-			// Refresh hash and crypt options in case the client reconnected with
-			// changed obfuscation settings.
+			// Refresh hash, crypt options and IPv6 in case the client reconnected
+			// with changed settings or a new address.
 			existing[i].UserHash = append([]byte(nil), src.UserHash...)
 			existing[i].CryptOptions = src.CryptOptions
+			existing[i].IPv6 = append([]byte(nil), src.IPv6...)
+			existing[i].IPv6Reachable = src.IPv6Reachable
 			m.sources[k] = existing
 			return
 		}

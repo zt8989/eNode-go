@@ -17,6 +17,11 @@ type SyncInfo struct {
 	PeerPort uint16
 	PeerHash [16]byte
 	ConnAck  [4]byte
+	// PeerVersion / HasVersion are set only for the OP_NAT_SYNC_EX form (27-byte
+	// payload, peer version appended at [26]). HasVersion==true therefore means
+	// the server answered with SYNC_EX rather than the plain 26-byte SYNC.
+	PeerVersion uint8
+	HasVersion  bool
 }
 
 func EncodeNATPacket(opcode uint8, payload []byte) []byte {
@@ -62,7 +67,25 @@ func DecodeSyncPayload(payload []byte) (SyncInfo, bool) {
 	info.PeerPort = binary.BigEndian.Uint16(payload[4:6])
 	copy(info.PeerHash[:], payload[6:22])
 	copy(info.ConnAck[:], payload[22:26])
+	if len(payload) >= 27 {
+		info.PeerVersion = payload[26]
+		info.HasVersion = true
+	}
 	return info, true
+}
+
+// BuildRegisterPacket encodes an OP_NAT_REGISTER (hash only) or, when ex is
+// true, an OP_NAT_REGISTER_EX carrying the client version byte after the hash.
+// Registering with ex>version 0 is what makes the server answer this client
+// with OP_NAT_SYNC_EX instead of the plain OP_NAT_SYNC.
+func BuildRegisterPacket(hash [16]byte, ex bool, version uint8) []byte {
+	if ex {
+		payload := make([]byte, 17)
+		copy(payload[:16], hash[:])
+		payload[16] = version
+		return EncodeNATPacket(ed2k.OpNatRegisterEx, payload)
+	}
+	return EncodeNATPacket(ed2k.OpNatRegister, hash[:])
 }
 
 func ParseHashHex(value string) ([16]byte, error) {

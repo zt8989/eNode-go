@@ -36,6 +36,13 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SEARCHRESULT` | `0x33` | Server -> Client | Search results list. |
 | `OP_CALLBACKREQUESTED` | `0x35` | Server -> LowID client | Notify LowID client to connect back. |
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
+| `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
+| `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
+
+IPv6 is additive and opt-in; classic packets are byte-identical to before. See
+[`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) for the
+full IPv6 wire formats (login `CT_MOD_IP_V6 0xAE` tag, the `0xFFFFFFFF` source
+sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000`).
 
 ## UDP OP Codes
 
@@ -51,6 +58,8 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_GLOBSERVSTATRES` | `0x97` | Server -> Client | UDP server stats response. |
 | `OP_SERVERDESCRES` | `0xa3` | Server -> Client | UDP server description response. |
 | `OP_GLOBSEARCHRES` | `0x99` | Server -> Client | UDP search results response. |
+| `OP_GLOBGETSOURCES_IPV6` | `0xa5` | Client -> Server | IPv6 tag-block UDP source query (opt-in); payload as `OP_GLOBGETSOURCES2`. |
+| `OP_GLOBFOUNDSOURCES_IPV6` | `0xa6` | Server -> Client | IPv6 tag-block UDP source response. |
 
 ## NAT Traversal UDP OP Codes (`PR_NAT = 0xf1`)
 
@@ -95,11 +104,15 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 
 ### UDP Payloads (Implemented Here)
 
+`OP_GLOBSERVSTATRES` doubles as the reply to the obfuscation **crypt-ping** bootstrap (a raw
+challenge on the obfuscated UDP port, `tcp.port + 12`). The reply carries the UDP obfuscation key at
+offset +36; see [server-udp-crypt-ping.md](server-udp-crypt-ping.md).
+
 | OP | Direction | Payload Format |
 |---|---|---|
 | `OP_GLOBFOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
 | `OP_GLOBSEARCHRES` | Server -> Client | One file per UDP packet: `fileRecord = fileHash + sourceID + sourcePort + tags` |
-| `OP_GLOBSERVSTATRES` | Server -> Client | `challenge(uint32) + users(uint32) + files(uint32) + maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32) + udpFlags(uint32) + lowIDUsers(uint32) + udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32)` |
+| `OP_GLOBSERVSTATRES` | Server -> Client | `challenge(uint32) + users(uint32) + files(uint32) + maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32) + udpFlags(uint32) + lowIDUsers(uint32) + udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32, per-client — derived from the client IP)` |
 | `OP_SERVERDESCRES` (old) | Server -> Client | `name(string) + description(string)` |
 | `OP_SERVERDESCRES` (extended) | Server -> Client | `challenge(uint32) + tags` |
 

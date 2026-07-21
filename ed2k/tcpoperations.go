@@ -13,6 +13,9 @@ type ServerConfig struct {
 	Hash        []byte
 	TCPPort     uint16
 	TCPFlags    uint32
+	// IPv6 is the server's own public IPv6 (16 network-order bytes), advertised as
+	// a CT_MOD_SVR_IP_V6 (0xaf) hash tag in OP_SERVERIDENT. Empty omits the tag.
+	IPv6 []byte
 }
 
 type LoginRequest struct {
@@ -47,15 +50,57 @@ func ParseLoginRequest(data *Buffer) (LoginRequest, error) {
 	return out, nil
 }
 
+// SourceFormat selects how a found-sources reply encodes each source.
+type SourceFormat int
+
+const (
+	// FormatClassic is the standard OP_FOUNDSOURCES layout, byte-identical to the
+	// pre-IPv6 output. Safe for every client.
+	FormatClassic SourceFormat = iota
+	// FormatSentinel is FormatClassic plus the eMuleAI 0xFFFFFFFF+16-byte sentinel
+	// for sources whose only routable address is IPv6. It desyncs a client that
+	// lacks the sentinel parser, so it may only be sent to a session known to carry
+	// it (connected over IPv6 or having sent CT_MOD_IP_V6).
+	FormatSentinel
+)
+
 func BuildFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
-	return buildFoundSourcesPacketWithOpcode(OpFoundSources, fileHash, sources, false)
+	return buildFoundSourcesPacketWithOpcode(OpFoundSources, fileHash, sources, false, FormatClassic)
 }
 
 func BuildFoundSourcesObfuPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
-	return buildFoundSourcesPacketWithOpcode(OpFoundSourcesObfu, fileHash, sources, true)
+	return buildFoundSourcesPacketWithOpcode(OpFoundSourcesObfu, fileHash, sources, true, FormatClassic)
 }
 
-func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []storage.Source, withObfuSettings bool) (*Buffer, error) {
+// BuildFoundSourcesSentinelPacket builds an OP_FOUNDSOURCES(_OBFU) reply that
+// encodes IPv6-only sources with the sentinel form. Caller must have verified the
+// requesting session parses it.
+func BuildFoundSourcesSentinelPacket(fileHash []byte, sources []storage.Source, obfu bool) (*Buffer, error) {
+	opcode := OpFoundSources
+	if obfu {
+		opcode = OpFoundSourcesObfu
+	}
+	return buildFoundSourcesPacketWithOpcode(opcode, fileHash, sources, obfu, FormatSentinel)
+}
+
+// hasHighID reports whether an ed2k ClientID is a routable HighID (a packed
+// public IPv4) rather than a LowID handle or the unset 0. A source with a HighID
+// is directly reachable over IPv4, so it is never replaced by the IPv6 sentinel.
+func hasHighID(id uint32) bool {
+	return id != 0 && !isLowID(id)
+}
+
+// sentinelForSource reports whether a source should be published with the IPv6
+// sentinel: it has a verified-reachable IPv6 and no routable IPv4 HighID, so its
+// only usable address is the IPv6. This matches eMuleAI's rule ("UINT_MAX means
+// HighID with IPv6 only should not be listed here"): a LowID or v6-only source
+// with a reachable v6 is better delivered as a direct v6 than as an uncallable
+// LowID, and a v6-only source has no other reachable form at all.
+func sentinelForSource(src storage.Source) bool {
+	return sourceHasReachableIPv6(src) && !hasHighID(src.ID)
+}
+
+func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []storage.Source, withObfuSettings bool, format SourceFormat) (*Buffer, error) {
 	// The count is a single byte, so truncate the slice rather than the count:
 	// uint8(256) is 0, which tells the client there are no sources and leaves the
 	// 256 records that follow to be parsed as the next packet.
@@ -66,6 +111,7 @@ func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []
 		{Type: TypeUint8, Value: uint8(len(sources))},
 	}
 	for _, src := range sources {
+		useSentinel := format == FormatSentinel && sentinelForSource(src)
 		// The port is sent verbatim for LowID sources too. There is no 0xFFFF
 		// sentinel in the ed2k protocol: eMule stores whatever arrives here
 		// (UpDownClient.cpp assigns m_userPort before it even looks at LowID) and
@@ -73,8 +119,12 @@ func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []
 		// propagates to peers that never contacted this server. Worse, ClientList
 		// and DeadSourceList key on (IP, port), so the same peer learned via
 		// OP_FOUNDSOURCES and via source exchange would never deduplicate.
+		id := src.ID
+		if useSentinel {
+			id = SentinelIPv6ID
+		}
 		pack = append(pack,
-			PacketItem{Type: TypeUint32, Value: src.ID},
+			PacketItem{Type: TypeUint32, Value: id},
 			PacketItem{Type: TypeUint16, Value: src.Port},
 		)
 		if withObfuSettings {
@@ -96,6 +146,12 @@ func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []
 			if obf&0x80 != 0 {
 				pack = append(pack, PacketItem{Type: TypeHash, Value: src.UserHash})
 			}
+		}
+		if useSentinel {
+			// The 16-byte IPv6 comes last, after any obfuscation fields — matching
+			// eMuleAI PartFile.cpp AddSources, which reads it only after the crypt
+			// options and user hash for an _OBFU source.
+			pack = append(pack, PacketItem{Type: TypeHash, Value: src.IPv6})
 		}
 	}
 	packet, err := MakePacket(PrED2K, pack)
@@ -205,15 +261,22 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	if err != nil {
 		return nil, err
 	}
+	tags := []Tag{
+		{Type: TypeString, Code: TagName, Data: conf.Name},
+		{Type: TypeString, Code: TagDescription, Data: conf.Description},
+	}
+	// Advertise the server's own IPv6 as a hash tag. eMule's OP_SERVERIDENT tag
+	// loop consumes unknown name-IDs and unknown trailing tags without
+	// disconnecting, so this is backward-compatible; a v6-aware client reads it.
+	if len(conf.IPv6) == 16 {
+		tags = append(tags, Tag{Type: TypeHash, Code: TagModSvrIPv6, Data: conf.IPv6})
+	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerIdent},
 		{Type: TypeHash, Value: conf.Hash},
 		{Type: TypeUint32, Value: ip},
 		{Type: TypeUint16, Value: conf.TCPPort},
-		{Type: TypeTags, Value: []Tag{
-			{Type: TypeString, Code: TagName, Data: conf.Name},
-			{Type: TypeString, Code: TagDescription, Data: conf.Description},
-		}},
+		{Type: TypeTags, Value: tags},
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {

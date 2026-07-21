@@ -16,6 +16,12 @@ func textLeaf(s string) *SearchExpr {
 	return &SearchExpr{Kind: SearchText, Text: s}
 }
 
+// fooLeafSQL is what a single indexable term ("foo", ≥ the word token size)
+// compiles to under the default mariadb dialect: a word-prefix MATCH, not a
+// leading-`%` LIKE. These tests exercise the AND/OR/NOT pruning combiner, which
+// is dialect-independent, so they pin one dialect and reuse this leaf shape.
+const fooLeafSQL = "(MATCH(s.name) AGAINST (? IN BOOLEAN MODE))"
+
 // One unsupported leaf used to poison the whole tree: buildSearchWhere returned
 // "" for it, and the AND/OR combiner propagated that "" upward through every
 // ancestor, discarding the sibling subtrees too. The engines then saw an empty
@@ -30,22 +36,22 @@ func TestBuildSearchWhereDropsUnsupportedLeaf(t *testing.T) {
 		{
 			"AND keeps the supported side",
 			&SearchExpr{Kind: SearchAnd, Left: textLeaf("foo"), Right: unsupportedLeaf()},
-			"(s.name LIKE ?)",
+			fooLeafSQL,
 		},
 		{
 			"AND keeps the supported side when it is on the right",
 			&SearchExpr{Kind: SearchAnd, Left: unsupportedLeaf(), Right: textLeaf("foo")},
-			"(s.name LIKE ?)",
+			fooLeafSQL,
 		},
 		{
 			"OR keeps the supported side",
 			&SearchExpr{Kind: SearchOr, Left: textLeaf("foo"), Right: unsupportedLeaf()},
-			"(s.name LIKE ?)",
+			fooLeafSQL,
 		},
 		{
 			"AND NOT with an unsupported right keeps the positive side",
 			&SearchExpr{Kind: SearchAndNot, Left: textLeaf("foo"), Right: unsupportedLeaf()},
-			"(s.name LIKE ?)",
+			fooLeafSQL,
 		},
 		{
 			// A bare NOT would match nearly the whole table — far wider than the
@@ -62,13 +68,13 @@ func TestBuildSearchWhereDropsUnsupportedLeaf(t *testing.T) {
 		{
 			"both sides supported still combine",
 			&SearchExpr{Kind: SearchAnd, Left: textLeaf("foo"), Right: &SearchExpr{Kind: SearchString, TagType: searchTypeExt, ValueString: "avi"}},
-			"((s.name LIKE ?) AND (s.ext = ?))",
+			"(" + fooLeafSQL + " AND (s.ext = ?))",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sql, args := BuildSearchWhere(tc.expr)
+			sql, args := BuildSearchWhere(tc.expr, DialectMariaDB)
 			t.Logf("output: sql=%q args=%v", sql, args)
 			if sql != tc.wantSQL {
 				t.Fatalf("got %q, want %q", sql, tc.wantSQL)
@@ -95,16 +101,16 @@ func TestBuildSearchWhereKeepsContradictionDistinctFromPrune(t *testing.T) {
 	blank := textLeaf("   ")
 
 	andExpr := &SearchExpr{Kind: SearchAnd, Left: textLeaf("foo"), Right: blank}
-	sql, _ := BuildSearchWhere(andExpr)
+	sql, _ := BuildSearchWhere(andExpr, DialectMariaDB)
 	t.Logf("output: `foo AND <blank>` -> %q", sql)
 	if sql != "" {
 		t.Fatalf("a contradiction under AND should match nothing, got %q", sql)
 	}
 
 	orExpr := &SearchExpr{Kind: SearchOr, Left: textLeaf("foo"), Right: blank}
-	sql, args := BuildSearchWhere(orExpr)
+	sql, args := BuildSearchWhere(orExpr, DialectMariaDB)
 	t.Logf("output: `foo OR <blank>` -> %q args=%v", sql, args)
-	if sql != "(s.name LIKE ?)" {
+	if sql != fooLeafSQL {
 		t.Fatalf("a contradiction under OR should be absorbed, got %q", sql)
 	}
 }
@@ -132,7 +138,7 @@ func TestMatchSearchExprAgreesWithSQLOnUnsupportedLeaf(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := MatchSearchExpr(tc.expr, file)
-			sql, _ := BuildSearchWhere(tc.expr)
+			sql, _ := BuildSearchWhere(tc.expr, DialectMariaDB)
 			t.Logf("input: file=%q -> output: memory=%t sqlClause=%q", file.Name, got, sql)
 
 			if got != tc.want {

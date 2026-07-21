@@ -17,24 +17,31 @@ type TCPServerConfig struct {
 	RequestCrypt   bool
 	SupportCrypt   bool
 	IPInLogin      bool
+	// DualStack selects the "tcp" network (accepts IPv4 and IPv6, honouring the
+	// bind address) instead of the IPv4-only "tcp4", and drives the SRV_TCPFLG_IPV6
+	// advertisement — a dual-stack server is exactly the one that supports IPv6.
+	// False reproduces the original IPv4-only behaviour exactly.
+	DualStack bool
 }
 
+// BuildTCPFlags builds the SRV_TCPFLG_* capability word sent in OP_IDCHANGE and
+// OP_SERVERIDENT.
+//
+// Only bits eMule actually defines for the *server* word are emitted
+// (srchybrid/Server.h): COMPRESSION 0x01, NEWTAGS 0x08, UNICODE 0x10,
+// LARGEFILES 0x100, TCPOBFUSCATION 0x400, and the IPv6 extension bit 0x4000. The
+// previous build packed client-side SRVCAP_* meanings (IP-in-login 0x02, aux-port
+// 0x04, support-crypt 0x200, require-crypt 0x800) into this word — bits eMule
+// reads as undefined and ignores. TCP obfuscation is advertised from SupportCrypt
+// (the obfuscated listener actually running), not RequestCrypt, which only set
+// 0x400 by coincidence and left it clear for a support-but-not-request server.
 func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 	flags := FlagZlib + FlagNewTags + FlagUnicode + FlagLargeFiles
-	if cfg.AuxiliarPort {
-		flags += FlagAuxPort
-	}
-	if cfg.RequireCrypt {
-		flags += FlagRequireCrypt
-	}
-	if cfg.RequestCrypt {
-		flags += FlagRequestCrypt
-	}
 	if cfg.SupportCrypt {
-		flags += FlagSupportCrypt
+		flags += FlagTcpObfusc
 	}
-	if cfg.IPInLogin {
-		flags += FlagIPInLogin
+	if cfg.DualStack {
+		flags += FlagIPv6
 	}
 	return flags
 }
@@ -47,7 +54,7 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 // so treating zero as a limit would refuse every connection on a default config.
 func RunTCPServer(cfg TCPServerConfig, handler func(net.Conn)) (net.Listener, error) {
 	addr := net.JoinHostPort(cfg.Address, strconv.Itoa(int(cfg.Port)))
-	ln, err := net.Listen("tcp4", addr)
+	ln, err := net.Listen(tcpNetwork(cfg.DualStack), addr)
 	if err != nil {
 		return nil, err
 	}
@@ -75,4 +82,13 @@ func RunTCPServer(cfg TCPServerConfig, handler func(net.Conn)) (net.Listener, er
 		}
 	}()
 	return ln, nil
+}
+
+// tcpNetwork selects the listen network. "tcp" binds dual-stack (both families,
+// governed by the bind address); "tcp4" is the original IPv4-only behaviour.
+func tcpNetwork(dualStack bool) string {
+	if dualStack {
+		return "tcp"
+	}
+	return "tcp4"
 }

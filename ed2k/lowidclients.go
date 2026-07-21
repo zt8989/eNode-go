@@ -3,6 +3,7 @@ package ed2k
 import (
 	"encoding/binary"
 	"hash/fnv"
+	"net"
 	"sync"
 )
 
@@ -94,10 +95,36 @@ func (l *LowIDClients) Add(client any) (uint32, bool) {
 func (l *LowIDClients) AddByEndpoint(ipv4 uint32, port uint16, client any) (uint32, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	key := endpointKey(ipv4, port)
+	return l.addByKeyLocked(key[:], client)
+}
+
+// AddByAddress seeds the LowID from the client's full connecting address. For an
+// IPv6 peer it keys on the 16 address bytes so v6-only clients (all of whom have
+// ipv4 == 0) do not collide on a single seed; for an IPv4 or absent address it
+// reuses the exact [ipv4 LE][port] key AddByEndpoint uses, leaving v4 LowID
+// assignment unchanged.
+func (l *LowIDClients) AddByAddress(ip net.IP, ipv4 uint32, port uint16, client any) (uint32, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok := IPv6Bytes(ip); ok {
+		key := make([]byte, 0, 18)
+		key = append(key, b[:]...)
+		var pb [2]byte
+		binary.LittleEndian.PutUint16(pb[:], port)
+		key = append(key, pb[:]...)
+		return l.addByKeyLocked(key, client)
+	}
+	key := endpointKey(ipv4, port)
+	return l.addByKeyLocked(key[:], client)
+}
+
+// endpointKey builds the [ipv4 LE][port LE] seed shared by the IPv4 LowID paths.
+func endpointKey(ipv4 uint32, port uint16) [6]byte {
 	var key [6]byte
 	binary.LittleEndian.PutUint32(key[0:4], ipv4)
 	binary.LittleEndian.PutUint16(key[4:6], port)
-	return l.addByKeyLocked(key[:], client)
+	return key
 }
 
 func (l *LowIDClients) Get(id uint32) (any, bool) {

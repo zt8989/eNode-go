@@ -82,10 +82,27 @@ func itemSize(item PacketItem) (int, error) {
 			return 0, ErrUnsupportedTag
 		}
 		return TagsLength(v)
+	case itemTagsU8:
+		v, ok := item.Value.([]Tag)
+		if !ok {
+			return 0, ErrUnsupportedTag
+		}
+		n, err := TagsLength(v)
+		if err != nil {
+			return 0, err
+		}
+		// TagsLength counts a 4-byte (uint32) tag-count header; this variant uses a
+		// 1-byte count, so subtract 4 and add 1.
+		return n - 3, nil
 	default:
 		return 0, fmt.Errorf("%w: 0x%x", ErrUnsupportedTag, item.Type)
 	}
 }
+
+// itemTagsU8 is an internal PacketItem type that writes a tag list with a uint8
+// count instead of TypeTags' uint32 count — the framing eMule's extended
+// source-exchange blocks use. 0xfe is outside the wire tag-type space.
+const itemTagsU8 uint8 = 0xfe
 
 func putItem(b *Buffer, item PacketItem) error {
 	switch item.Type {
@@ -122,6 +139,20 @@ func putItem(b *Buffer, item PacketItem) error {
 		if v, ok := item.Value.([]Tag); ok {
 			return b.PutTags(v)
 		}
+	case itemTagsU8:
+		v, ok := item.Value.([]Tag)
+		if !ok {
+			return ErrUnsupportedTag
+		}
+		if err := b.PutUInt8(uint8(len(v))); err != nil {
+			return err
+		}
+		for _, t := range v {
+			if err := b.PutTag(t); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	return ErrUnsupportedTag
 }

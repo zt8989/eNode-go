@@ -30,7 +30,9 @@ func TestEscapeLike(t *testing.T) {
 // build the bound argument is the raw "%a%b%".
 func TestBuildSearchWhereEscapesWildcards(t *testing.T) {
 	expr := &SearchExpr{Kind: SearchText, Text: "a%b"}
-	sql, args := BuildSearchWhere(expr)
+	// "a%b" has no run the index can tokenize (a and b are single chars), so both
+	// dialects emit only the residual LIKE — the escaping path under test.
+	sql, args := BuildSearchWhere(expr, DialectMariaDB)
 	t.Logf("input: text search %q", "a%b")
 	t.Logf("output: sql=%q args=%v", sql, args)
 

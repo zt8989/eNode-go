@@ -36,9 +36,10 @@ type Config struct {
 	AuxiliarPort bool `yaml:"auxiliarPort"`
 	IPInLogin    bool `yaml:"IPinLogin"`
 
-	TCP TCPConfig `yaml:"tcp"`
-	UDP UDPConfig `yaml:"udp"`
-	NAT NATConfig `yaml:"natTraversal"`
+	TCP  TCPConfig  `yaml:"tcp"`
+	UDP  UDPConfig  `yaml:"udp"`
+	NAT  NATConfig  `yaml:"natTraversal"`
+	IPv6 IPv6Config `yaml:"ipv6"`
 
 	Storage StorageConfig `yaml:"storage"`
 }
@@ -65,13 +66,58 @@ type UDPConfig struct {
 	PortObfuscated uint16 `yaml:"portObfuscated"`
 	GetSources     bool   `yaml:"getSources"`
 	GetFiles       bool   `yaml:"getFiles"`
-	ServerKey      uint32 `yaml:"serverKey"`
+	// ServerKey is a server-wide secret seed, not the key sent to clients: each
+	// client's UDP obfuscation key is derived from it plus the client's IP
+	// (ed2k.deriveUDPKey). See docs/server-udp-crypt-ping.md.
+	ServerKey uint32 `yaml:"serverKey"`
 }
 
 type NATConfig struct {
 	Enabled                bool   `yaml:"enabled"`
 	Port                   uint16 `yaml:"port"`
 	RegistrationTTLSeconds int    `yaml:"registrationTTLSeconds"`
+}
+
+// IPv6Config controls dual-stack listening and IPv6 source publication. When
+// disabled the server behaves exactly as before: IPv4-only listeners, no IPv6
+// parsed, stored or emitted.
+//
+// Enabled/PublishSources/ProbeReachability are *bool so an absent key can be told
+// from an explicit false — the intended default is on, and a plain bool would
+// default a missing key to off (see CleanupConfig.KeepZeroSourceFiles).
+type IPv6Config struct {
+	Enabled *bool `yaml:"enabled"`
+	// Address is an explicit IPv6 bind. Empty means the top-level `address` governs
+	// the bind (an empty top-level address is the dual-stack wildcard).
+	Address string `yaml:"address"`
+	// DynIP6 is the server's public IPv6, or "auto" to resolve it via TestURLs6 /
+	// local interface enumeration. Empty disables self-advertisement of a v6.
+	DynIP6            string   `yaml:"dynIp6"`
+	TestURLs6         []string `yaml:"testUrls6"`
+	PublishSources    *bool    `yaml:"publishSources"`
+	ProbeReachability *bool    `yaml:"probeReachability"`
+}
+
+// EnabledOrDefault reports whether IPv6 is enabled, defaulting to true.
+func (c IPv6Config) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+
+// PublishSourcesOrDefault reports whether IPv6 sources are emitted, defaulting to
+// true (subject to EnabledOrDefault).
+func (c IPv6Config) PublishSourcesOrDefault() bool { return boolOrDefault(c.PublishSources, true) }
+
+// ProbeReachabilityOrDefault reports whether the server probes a client's IPv6
+// before publishing it as a source, defaulting to true.
+func (c IPv6Config) ProbeReachabilityOrDefault() bool {
+	return boolOrDefault(c.ProbeReachability, true)
+}
+
+// boolOrDefault returns *p, or def when p is nil. The *bool pattern lets an absent
+// YAML key be told from an explicit false (see the IPv6 and cleanup toggles).
+func boolOrDefault(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
 }
 
 type StorageConfig struct {
@@ -101,10 +147,7 @@ type CleanupConfig struct {
 // knows about but currently has none online for. The search result is how a user
 // discovers the hash at all, so deleting it removes discovery for no gain.
 func (c CleanupConfig) KeepZeroSourceFilesOrDefault() bool {
-	if c.KeepZeroSourceFiles == nil {
-		return true
-	}
-	return *c.KeepZeroSourceFiles
+	return boolOrDefault(c.KeepZeroSourceFiles, true)
 }
 
 type MySQLConfig struct {
@@ -118,6 +161,12 @@ type MySQLConfig struct {
 	// SchemaFile is the DDL applied on first connect when the tables are missing.
 	// Relative to the working directory; defaults to misc/enode.sql.
 	SchemaFile string `yaml:"schemaFile"`
+	// Dialect selects the full-text search strategy, since MariaDB and MySQL do
+	// not share one. "mariadb" (the default) uses a plain word-based FULLTEXT
+	// index and word-prefix matching, portable to both servers. "mysql" uses the
+	// ngram parser (MySQL 5.7.6+ only) for true substring matching. See
+	// storage.DialectMariaDB / storage.DialectMySQL and docs/database-engines.local.md.
+	Dialect string `yaml:"dialect"`
 }
 
 type MongoDBConfig struct {
@@ -136,13 +185,32 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, err
 	}
-	setDefaults(&cfg)
+	if err := setDefaults(&cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
-func setDefaults(cfg *Config) {
-	if cfg.Address == "" {
+func setDefaults(cfg *Config) error {
+	// With IPv6 disabled, an empty bind pins to the IPv4 wildcard exactly as
+	// before. With IPv6 enabled, an empty bind is left empty so the listener binds
+	// the dual-stack wildcard ([::]) and accepts both families; an operator who
+	// wants IPv4-only sets address: "0.0.0.0" explicitly.
+	if cfg.Address == "" && !cfg.IPv6.EnabledOrDefault() {
 		cfg.Address = "0.0.0.0"
+	}
+	if len(cfg.IPv6.TestURLs6) == 0 {
+		// Ordered literal-IP first (the address pins the family, immune to DNS /
+		// Happy Eyeballs), then v6-only hostnames, then dual-stack hosts. Verified
+		// live 2026-07-20. 6.ipw.cn is included last but returned empty on probe.
+		cfg.IPv6.TestURLs6 = []string{
+			"https://[2606:4700:4700::1111]/cdn-cgi/trace",
+			"https://v6.ident.me",
+			"https://ipv6.icanhazip.com",
+			"https://api64.ipify.org",
+			"https://www.cloudflare.com/cdn-cgi/trace",
+			"https://6.ipw.cn",
+		}
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
@@ -159,7 +227,8 @@ func setDefaults(cfg *Config) {
 		}
 	}
 	// Ports match the Node original (enode.config.js) and both shipped YAMLs:
-	// TCP 5555/5565 and UDP 5559/5569, preserving the original's tcp+4 relation.
+	// TCP 5555/5565 and plaintext UDP 5559 (tcp+4, the port eMule pings for the
+	// unencrypted stat — srchybrid/UDPSocket.cpp:771-772).
 	// The port previously fell back to the classic eDonkey 4661/4662/4665/4666,
 	// which no config in the repo uses — so a YAML omitting the port keys bound
 	// different ports than every sample config.
@@ -175,8 +244,14 @@ func setDefaults(cfg *Config) {
 	if cfg.UDP.Port == 0 {
 		cfg.UDP.Port = 5559
 	}
+	// eMule hardwires the server-UDP crypt-ping to tcp+12 and, on first contact,
+	// only accepts the reply from that same port (srchybrid/ServerList.cpp:294,
+	// GetServerByIPUDP :563-576). So the obfuscated UDP listener must sit at
+	// tcp.port+12 (5567) — not tcp.portObfuscated+4 — or the crypt-ping bootstrap
+	// is unreachable and clients fall back to the plaintext stat. See
+	// docs/server-udp-crypt-ping.md.
 	if cfg.UDP.PortObfuscated == 0 {
-		cfg.UDP.PortObfuscated = 5569
+		cfg.UDP.PortObfuscated = cfg.TCP.Port + 12
 	}
 	if cfg.NAT.Port == 0 {
 		cfg.NAT.Port = 2004
@@ -199,12 +274,23 @@ func setDefaults(cfg *Config) {
 	if cfg.Storage.MySQL.SchemaFile == "" {
 		cfg.Storage.MySQL.SchemaFile = "misc/enode.sql"
 	}
+	// Default to the portable word-based dialect; an operator on real MySQL opts
+	// into the ngram substring path explicitly. Fail fast on a typo rather than
+	// silently picking a strategy the operator did not intend.
+	if cfg.Storage.MySQL.Dialect == "" {
+		cfg.Storage.MySQL.Dialect = storage.DialectMariaDB
+	}
+	if cfg.Storage.MySQL.Dialect != storage.DialectMariaDB && cfg.Storage.MySQL.Dialect != storage.DialectMySQL {
+		return fmt.Errorf("storage.mysql.dialect %q is invalid: use %q or %q",
+			cfg.Storage.MySQL.Dialect, storage.DialectMariaDB, storage.DialectMySQL)
+	}
 	if cfg.Storage.MongoDB.Port == 0 {
 		cfg.Storage.MongoDB.Port = 27017
 	}
 	if cfg.Storage.MongoDB.Database == "" {
 		cfg.Storage.MongoDB.Database = "enode"
 	}
+	return nil
 }
 
 func (c Config) StorageEngineConfig() storage.Config {
@@ -221,6 +307,7 @@ func (c Config) StorageEngineConfig() storage.Config {
 		// had no effect anywhere in the program.
 		DeadlockDelay: time.Duration(c.Storage.MySQL.DeadlockDelay) * time.Millisecond,
 		SchemaFile:    c.Storage.MySQL.SchemaFile,
+		Dialect:       c.Storage.MySQL.Dialect,
 	}
 	mongoURI := c.Storage.MongoDB.URI
 	if mongoURI == "" {

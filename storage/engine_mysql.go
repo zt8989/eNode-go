@@ -39,7 +39,21 @@ type MySQLConfig struct {
 	// running from a subpackage should resolve it with tests.FixRelativeTestingPath.
 	// Empty means the default below.
 	SchemaFile string
+	// Dialect selects the full-text search strategy. DialectMariaDB (the default
+	// when empty) uses a plain word-based FULLTEXT index and word-prefix matching,
+	// which both MariaDB 10.0.5+ and MySQL 5.6.4+ support. DialectMySQL uses the
+	// ngram parser (MySQL 5.7.6+ only) for substring matching. See BuildSearchWhere
+	// and specializeFulltextIndex.
+	Dialect string
 }
+
+const (
+	// DialectMariaDB is the portable, word-based full-text strategy (the default).
+	// It is the only strategy MariaDB can index — MariaDB has no ngram parser.
+	DialectMariaDB = "mariadb"
+	// DialectMySQL uses MySQL's ngram full-text parser for substring search.
+	DialectMySQL = "mysql"
+)
 
 type MySQLEngine struct {
 	cfg     MySQLConfig
@@ -68,6 +82,11 @@ func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {
 	}
 	if cfg.SchemaFile == "" {
 		cfg.SchemaFile = defaultSchemaFile
+	}
+	// Default to the portable word-based dialect so a directly-constructed config
+	// (tests, embedders bypassing config.Load) never lands on an empty strategy.
+	if cfg.Dialect == "" {
+		cfg.Dialect = DialectMariaDB
 	}
 	return &MySQLEngine{cfg: cfg}, nil
 }
@@ -175,9 +194,9 @@ func (m *MySQLEngine) Connect(info ClientInfo) (uint64, error) {
 		return 0, err
 	}
 	_, err := m.db.Exec(
-		`INSERT INTO clients(hash, id_ed2k, ipv4, port, crypt_options, online) VALUES(?,?,?,?,?,1)
-		 ON DUPLICATE KEY UPDATE id_ed2k=VALUES(id_ed2k), ipv4=VALUES(ipv4), port=VALUES(port), crypt_options=VALUES(crypt_options), online=1`,
-		info.Hash, info.ID, info.IPv4, info.Port, info.CryptOptions,
+		`INSERT INTO clients(hash, id_ed2k, ipv4, port, crypt_options, ipv6, ipv6_reachable, online) VALUES(?,?,?,?,?,?,?,1)
+		 ON DUPLICATE KEY UPDATE id_ed2k=VALUES(id_ed2k), ipv4=VALUES(ipv4), port=VALUES(port), crypt_options=VALUES(crypt_options), ipv6=VALUES(ipv6), ipv6_reachable=VALUES(ipv6_reachable), online=1`,
+		info.Hash, info.ID, info.IPv4, info.Port, info.CryptOptions, nullableIPv6(info.IPv6), boolToTinyInt(info.IPv6Reachable),
 	)
 	if err != nil {
 		return 0, err
@@ -275,7 +294,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 		return nil
 	}
 	rows, err := m.db.Query(
-		`SELECT c.id_ed2k, c.port, c.hash, c.crypt_options
+		`SELECT c.id_ed2k, c.port, c.hash, c.crypt_options, c.ipv6, c.ipv6_reachable
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
@@ -289,14 +308,7 @@ func (m *MySQLEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 		return nil
 	}
 	defer rows.Close()
-	var out []Source
-	for rows.Next() {
-		var s Source
-		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash, &s.CryptOptions); err == nil {
-			out = append(out, s)
-		}
-	}
-	return out
+	return scanSources(rows)
 }
 
 func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
@@ -304,7 +316,7 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 		return nil
 	}
 	rows, err := m.db.Query(
-		`SELECT c.id_ed2k, c.port, c.hash, c.crypt_options
+		`SELECT c.id_ed2k, c.port, c.hash, c.crypt_options, c.ipv6, c.ipv6_reachable
 		 FROM sources s
 		 INNER JOIN clients c ON c.id = s.id_client
 		 INNER JOIN files f ON f.id = s.id_file
@@ -318,18 +330,43 @@ func (m *MySQLEngine) GetSourcesByHash(fileHash []byte) []Source {
 		return nil
 	}
 	defer rows.Close()
+	return scanSources(rows)
+}
+
+// scanSources reads the shared source projection (id_ed2k, port, hash,
+// crypt_options, ipv6, ipv6_reachable) into Source values. ipv6 is NULL for a
+// client with no IPv6, which scans to a nil slice.
+func scanSources(rows *sql.Rows) []Source {
 	var out []Source
 	for rows.Next() {
 		var s Source
-		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash, &s.CryptOptions); err == nil {
+		var reachable int
+		if err := rows.Scan(&s.ID, &s.Port, &s.UserHash, &s.CryptOptions, &s.IPv6, &reachable); err == nil {
+			s.IPv6Reachable = reachable != 0
 			out = append(out, s)
 		}
 	}
 	return out
 }
 
+// nullableIPv6 maps a 16-byte IPv6 to itself and anything else (nil, wrong
+// length) to a NULL column value, so a client with no IPv6 stores NULL rather
+// than a zero blob.
+func nullableIPv6(b []byte) any {
+	if len(b) != 16 {
+		return nil
+	}
+	return b
+}
+
 func (m *MySQLEngine) FindByNameContains(term string) []File {
 	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	// Reuse the dialect-aware builder so this path matches FindBySearch's
+	// full-text semantics exactly instead of falling back to a leading-`%` scan.
+	where, args := buildSearchWhere(&SearchExpr{Kind: SearchText, Text: term}, m.cfg.Dialect)
+	if where == "" {
 		return nil
 	}
 	rows, err := m.db.Query(
@@ -337,10 +374,10 @@ func (m *MySQLEngine) FindByNameContains(term string) []File {
 		        s.type, s.title, s.artist, s.album, s.length, s.bitrate, s.codec
 		 FROM sources s
 		 INNER JOIN files f ON s.id_file = f.id
-		 WHERE s.name LIKE ?
+		 WHERE `+where+`
 		 ORDER BY s.time_offer DESC
 		 LIMIT 255`,
-		"%"+term+"%",
+		args...,
 	)
 	if err != nil {
 		logging.Errorf("mysql find by name %q failed: %v", term, err)
@@ -364,27 +401,36 @@ func (m *MySQLEngine) FindBySearch(expr *SearchExpr) []File {
 	if err := m.ensureDB(); err != nil {
 		return nil
 	}
-	where, args := BuildSearchWhere(expr)
+	where, args := BuildSearchWhere(expr, m.cfg.Dialect)
 	if where == "" {
 		return nil
 	}
 	// One row per file, carrying metadata from an arbitrary representative
 	// source — the semantics the MySQL 5.5 original relied on implicitly.
 	//
-	// ANY_VALUE() states that explicitly. Without it, ONLY_FULL_GROUP_BY (default
-	// since 5.7) rejects the query with ER_1055: grouping is by s.id_file, and
-	// sources' only uniqueness covering it is UNIQUE(id_file, id_client), so
-	// id_file alone does not determine a source row. The f.* columns need no
-	// wrapping — they are functionally dependent through s.id_file = f.id, where
-	// f.id is the primary key.
+	// Grouping is by s.id_file, and sources' only uniqueness covering it is
+	// UNIQUE(id_file, id_client), so id_file alone does not determine a source
+	// row — the s.* columns are non-aggregated. How that is spelled depends on the
+	// server, and the two are mutually exclusive:
+	//   - MySQL 8 defaults to ONLY_FULL_GROUP_BY and rejects a bare s.* with
+	//     ER_1055, so each is wrapped in ANY_VALUE().
+	//   - MariaDB has no ANY_VALUE() function at all, but its default sql_mode
+	//     omits ONLY_FULL_GROUP_BY, so the bare column is both legal and the only
+	//     option.
+	// The f.* columns need no wrapping either way — they are functionally
+	// dependent through s.id_file = f.id, where f.id is the primary key. The
+	// dialect must match the actual server (the same requirement the ngram index
+	// has); a mismatch here surfaces as an ER_1055 or unknown-function error
+	// rather than silently.
 	//
 	// Deliberately not fixed by relaxing sql_mode in the DSN: that would also
 	// decide STRICT_TRANS_TABLES, silently masking oversized/invalid client tags
 	// instead of letting the normalization in NormalizeFile handle them.
+	rep := groupRepFunc(m.cfg.Dialect)
 	rows, err := m.db.Query(
-		`SELECT ANY_VALUE(s.name), f.completed, f.sources, f.hash, f.size, f.source_id, f.source_port,
-		        ANY_VALUE(s.type), ANY_VALUE(s.title), ANY_VALUE(s.artist), ANY_VALUE(s.album),
-		        ANY_VALUE(s.length), ANY_VALUE(s.bitrate), ANY_VALUE(s.codec)
+		`SELECT `+rep("s.name")+`, f.completed, f.sources, f.hash, f.size, f.source_id, f.source_port,
+		        `+rep("s.type")+`, `+rep("s.title")+`, `+rep("s.artist")+`, `+rep("s.album")+`,
+		        `+rep("s.length")+`, `+rep("s.bitrate")+`, `+rep("s.codec")+`
 		 FROM sources s
 		 INNER JOIN files f ON s.id_file = f.id
 		 WHERE `+where+`
@@ -654,7 +700,38 @@ func (m *MySQLEngine) ensureSchema(ctx context.Context, db *sql.DB) error {
 	if n > 0 {
 		return nil
 	}
-	return m.applySchema(ctx)
+	if err := m.applySchema(ctx); err != nil {
+		return err
+	}
+	return m.specializeFulltextIndex(ctx, db)
+}
+
+// specializeFulltextIndex upgrades the portable word-based name_ft index created
+// by the schema file to MySQL's ngram parser, which the word-prefix baseline
+// cannot do but which the mysql dialect's substring matching requires. It runs
+// only on a fresh install (right after applySchema, empty table → instant) and
+// only for DialectMySQL — MariaDB has no ngram parser and keeps the baseline
+// index untouched. An existing deployment is out of scope (matching the
+// no-migration policy above); docs/database-engines.local.md gives the manual
+// ALTER for that case.
+func (m *MySQLEngine) specializeFulltextIndex(ctx context.Context, db *sql.DB) error {
+	if m.cfg.Dialect != DialectMySQL {
+		return nil
+	}
+	// A FULLTEXT index's parser is fixed at creation, so switch to ngram by
+	// dropping and re-adding. These MUST be two separate statements: a combined
+	// `DROP INDEX ..., ADD FULLTEXT ... WITH PARSER ngram` silently discards the
+	// parser clause (verified on MySQL 8.0 — SHOW CREATE TABLE comes back without
+	// WITH PARSER), leaving a word-based index that only matches whole tokens and
+	// so never does the substring search the mysql dialect promises.
+	if _, err := db.ExecContext(ctx, "ALTER TABLE sources DROP INDEX name_ft"); err != nil {
+		return fmt.Errorf("mysql drop name_ft before ngram rebuild (dialect=mysql): %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE sources ADD FULLTEXT INDEX name_ft (name) WITH PARSER ngram"); err != nil {
+		return fmt.Errorf("mysql add ngram name_ft (dialect=mysql): %w", err)
+	}
+	logging.Infof("mysql: specialized sources.name_ft full-text index to ngram parser (dialect=mysql)")
+	return nil
 }
 
 // applySchema reads the SchemaFile and executes it in one shot. It uses a
@@ -677,4 +754,15 @@ func (m *MySQLEngine) applySchema(ctx context.Context) error {
 	}
 	logging.Infof("mysql: created schema from %s", m.cfg.SchemaFile)
 	return nil
+}
+
+// groupRepFunc returns how to render a non-aggregated source column under the
+// GROUP BY in FindBySearch, which differs by server: ANY_VALUE() on MySQL (to
+// satisfy ONLY_FULL_GROUP_BY) versus the bare column on MariaDB (which has no
+// ANY_VALUE() but also no ONLY_FULL_GROUP_BY by default). See FindBySearch.
+func groupRepFunc(dialect string) func(col string) string {
+	if dialect == DialectMySQL {
+		return func(col string) string { return "ANY_VALUE(" + col + ")" }
+	}
+	return func(col string) string { return col }
 }

@@ -43,6 +43,22 @@ func BuildGlobSearchResPackets(files []storage.File) ([]*Buffer, error) {
 }
 
 func BuildGlobFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
+	return buildGlobFoundSources(fileHash, sources, FormatClassic)
+}
+
+// BuildGlobFoundSourcesSentinelPacket encodes IPv6-only sources with the sentinel
+// form in the classic OP_GLOBFOUNDSOURCES datagram. Only safe when the query
+// arrived over IPv6 (the sender is v6-capable by construction); a vanilla client's
+// coalescing skip stride (count*(4+2)) would desync on the extra 16 bytes.
+//
+// This relies on the server emitting exactly one file block per datagram — the
+// caller does so (one udpSend per hash), so the desync-prone multi-block skip is
+// never exercised. Do not batch multiple hashes into one datagram with this form.
+func BuildGlobFoundSourcesSentinelPacket(fileHash []byte, sources []storage.Source) (*Buffer, error) {
+	return buildGlobFoundSources(fileHash, sources, FormatSentinel)
+}
+
+func buildGlobFoundSources(fileHash []byte, sources []storage.Source, format SourceFormat) (*Buffer, error) {
 	// Single-byte count: truncate the slice, not the count. See capWireSources.
 	sources = capWireSources(sources)
 	pack := []PacketItem{
@@ -51,10 +67,18 @@ func BuildGlobFoundSourcesPacket(fileHash []byte, sources []storage.Source) (*Bu
 		{Type: TypeUint8, Value: uint8(len(sources))},
 	}
 	for _, src := range sources {
+		id := src.ID
+		useSentinel := format == FormatSentinel && sentinelForSource(src)
+		if useSentinel {
+			id = SentinelIPv6ID
+		}
 		pack = append(pack,
-			PacketItem{Type: TypeUint32, Value: src.ID},
+			PacketItem{Type: TypeUint32, Value: id},
 			PacketItem{Type: TypeUint16, Value: src.Port},
 		)
+		if useSentinel {
+			pack = append(pack, PacketItem{Type: TypeHash, Value: src.IPv6})
+		}
 	}
 	return MakeUDPPacket(PrED2K, pack)
 }

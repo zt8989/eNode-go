@@ -274,6 +274,8 @@ func TagsLength(tags []Tag) (int, error) {
 				return 0, ErrUnsupportedTag
 			}
 			length += 2 + len([]byte(v))
+		case TypeHash:
+			length += 16
 		case TypeUint8:
 			length += 1
 		case TypeUint16:
@@ -307,6 +309,12 @@ func (b *Buffer) PutTag(tag Tag) error {
 			return ErrUnsupportedTag
 		}
 		return b.PutString(v)
+	case TypeHash:
+		v, ok := tag.Data.([]byte)
+		if !ok {
+			return ErrUnsupportedTag
+		}
+		return b.PutHash(v)
 	case TypeUint8:
 		switch v := tag.Data.(type) {
 		case uint8:
@@ -384,6 +392,46 @@ func (b *Buffer) GetTagValue(typ uint8) (any, error) {
 		return uint64(v), err
 	case TypeUint64:
 		return b.GetUInt64LE()
+	case TypeHash:
+		// 16 raw bytes, no length prefix. eMuleAI's CT_MOD_IP_V6 (0xae) and
+		// CT_MOD_SVR_IP_V6 (0xaf) ride this type; before it was decoded, a login
+		// carrying a public IPv6 aborted the whole tag list and the client never
+		// got OP_IDCHANGE.
+		if b.Remaining() < 16 {
+			return nil, ErrOutOfBounds
+		}
+		return append([]byte(nil), b.Get(16)...), nil
+	case TypeFloat:
+		if b.Remaining() < 4 {
+			return nil, ErrOutOfBounds
+		}
+		return math.Float32frombits(binary.LittleEndian.Uint32(b.Get(4))), nil
+	case TypeBool:
+		v, err := b.GetUInt8()
+		if err != nil {
+			return nil, err
+		}
+		return v != 0, nil
+	case TypeBlob:
+		// uint32 length prefix, then that many bytes.
+		n, err := b.GetUInt32LE()
+		if err != nil {
+			return nil, err
+		}
+		if b.Remaining() < int(n) {
+			return nil, ErrOutOfBounds
+		}
+		return append([]byte(nil), b.Get(int(n))...), nil
+	case TypeBsob:
+		// uint8 length prefix, then that many bytes.
+		n, err := b.GetUInt8()
+		if err != nil {
+			return nil, err
+		}
+		if b.Remaining() < int(n) {
+			return nil, ErrOutOfBounds
+		}
+		return append([]byte(nil), b.Get(int(n))...), nil
 	default:
 		return nil, fmt.Errorf("%w: 0x%x", ErrUnsupportedTag, typ)
 	}
@@ -433,6 +481,10 @@ func tagName(code uint8) string {
 		return "options1"
 	case TagEmuleOptions2:
 		return "options2"
+	case TagModIPv6:
+		return "ipv6"
+	case TagModSvrIPv6:
+		return "svripv6"
 	default:
 		return fmt.Sprintf("0x%x", code)
 	}
@@ -449,6 +501,10 @@ func (b *Buffer) GetTag() (NamedTag, error) {
 
 	var code uint8
 	var value any
+	// name overrides the code-derived name when a tag carries a textual name
+	// (name length != 1) instead of a single-byte code.
+	var name string
+	haveName := false
 
 	if tagType&0x80 != 0 {
 		shortFormat = true
@@ -475,19 +531,24 @@ func (b *Buffer) GetTag() (NamedTag, error) {
 			if err != nil {
 				return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-name-len", TagType: origTagType, Err: err}
 			}
-			if l != 1 {
-				return NamedTag{}, &TagDecodeError{
-					Pos:     startPos,
-					Stage:   "name-len-ne-1",
-					TagType: origTagType,
-					Err:     fmt.Errorf("%w: name-len=%d", ErrUnhandledTag, l),
+			if l == 1 {
+				c, err := b.GetUInt8()
+				if err != nil {
+					return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-name-code", TagType: origTagType, Err: err}
 				}
+				code = c
+			} else {
+				// Textual tag name. eMule permits a string name in place of the
+				// single-byte code; consume it so the value stays in sync rather
+				// than aborting the whole list. We key tags by numeric code, so a
+				// string-named tag simply carries its literal name and matches no
+				// known code.
+				if b.Remaining() < int(l) {
+					return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-name-string", TagType: origTagType, Err: ErrOutOfBounds}
+				}
+				name = string(b.Get(int(l)))
+				haveName = true
 			}
-			c, err := b.GetUInt8()
-			if err != nil {
-				return NamedTag{}, &TagDecodeError{Pos: startPos, Stage: "read-name-code", TagType: origTagType, Err: err}
-			}
-			code = c
 		}
 		v, err := b.GetTagValue(tagType)
 		if err != nil {
@@ -496,7 +557,10 @@ func (b *Buffer) GetTag() (NamedTag, error) {
 		value = v
 	}
 
-	return NamedTag{Name: tagName(code), Value: value}, nil
+	if !haveName {
+		name = tagName(code)
+	}
+	return NamedTag{Name: name, Value: value}, nil
 }
 
 func (b *Buffer) GetTags() ([]NamedTag, error) {

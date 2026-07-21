@@ -41,6 +41,17 @@ type TCPRuntimeConfig struct {
 	// tcp.maxLowID). Zero means "use the default", resolved in NewLowIDClients.
 	MinLowID uint32
 	MaxLowID uint32
+	// IPv6 is the master switch: dual-stack accept, CT_MOD_IP_V6 parsing, the
+	// SRV_*FLG_IPV6 advertisement, and CT_MOD_SVR_IP_V6. PublishV6Sources
+	// additionally gates whether IPv6 sources are emitted (the sentinel and
+	// tag-block formats) — a server can accept v6 clients without publishing them.
+	// ProbeIPv6 verifies a client's advertised IPv6 is reachable before publishing;
+	// when off, a known IPv6 is trusted as reachable. ServerIPv6 is the server's own
+	// public IPv6 (16 bytes) for CT_MOD_SVR_IP_V6.
+	IPv6             bool
+	PublishV6Sources bool
+	ProbeIPv6        bool
+	ServerIPv6       []byte
 }
 
 type UDPRuntimeConfig struct {
@@ -69,6 +80,13 @@ type ServerRuntime struct {
 	NAT      *NATTraversalHandler
 	counters *counterCache
 }
+
+// ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
+// parsing, advertisement). publishV6Sources reports whether IPv6 sources are
+// emitted. Both the TCP and UDP handlers read these accessors rather than poking
+// the TCP runtime config directly, so the two stacks share one source of truth.
+func (s *ServerRuntime) ipv6Enabled() bool      { return s.TCP.IPv6 }
+func (s *ServerRuntime) publishV6Sources() bool { return s.TCP.PublishV6Sources }
 
 func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.Engine) *ServerRuntime {
 	if tcp.ServerStatusInterval <= 0 {
@@ -105,7 +123,6 @@ func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 }
 
 func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, *net.UDPConn) {
-	crypt := NewUDPCrypt(enableCrypt, s.UDP.UDPServerKey)
 	module := "udp"
 	if enableCrypt {
 		module = "udp-obfs"
@@ -114,7 +131,15 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		if len(data) == 0 {
 			return
 		}
-		if crypt != nil && crypt.Status == CsEncrypting {
+		// The obfuscation key is per-client, derived from the source IP (see
+		// deriveUDPKey). Built per datagram, not once per listener: the handler
+		// runs concurrently across a worker pool (udpserver.go), so a shared crypt
+		// whose key varied per client would race. crypt.ServerKey is the key we
+		// also advertise to this client at reply offset +36, so both directions
+		// agree. On the plaintext listener the crypt does no crypto but still
+		// carries the derived key for the stat reply to advertise.
+		crypt := NewUDPCrypt(enableCrypt, deriveUDPKey(s.UDP.UDPServerKey, remote.IP))
+		if crypt.Status == CsEncrypting {
 			data = crypt.Decrypt(data)
 		}
 		if s.NAT != nil {
@@ -136,6 +161,17 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			return
 		}
 		if protocol != PrED2K {
+			// Server-UDP crypt-ping: a client without our UDP key yet sends a raw
+			// 32-bit challenge (+ up to 15 padding bytes) to the obfuscated port
+			// before it can obfuscate anything. It fails the fixed-key Decrypt above
+			// (no SYNC_SERVER), so `data` is still the raw bytes and its first byte
+			// is not PR_ED2K. Answer with the stat reply keyed on the challenge so
+			// the client learns our real UDP key. Only on the obfuscated listener,
+			// where such a probe is expected. See docs/server-udp-crypt-ping.md.
+			if enableCrypt && isCryptPing(data) {
+				s.udpCryptPingReply(data, remote, conn, crypt.ServerKey, module)
+				return
+			}
 			logging.Debugf("udp unsupported protocol remote=%s proto=0x%x", remote, protocol)
 			return
 		}
@@ -154,6 +190,11 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 				return
 			}
 			s.udpGlobGetSources2(b, remote, conn, crypt, module)
+		case OpGlobGetSourcesIPv6:
+			if !s.publishV6Sources() || !s.udpOpcodeEnabled(s.UDP.GetSources, code, remote) {
+				return
+			}
+			s.udpGlobGetSourcesIPv6(b, remote, conn, crypt, module)
 		case OpGlobServStatReq:
 			s.udpGlobServStatReq(b, remote, conn, crypt, module)
 		case OpServerDescReq:
@@ -189,6 +230,18 @@ type tcpClient struct {
 	remoteHost string
 	statusStop chan struct{}
 
+	// peerIP is the connecting address, family-normalised (mapped v4 collapsed to
+	// plain IPv4). connectedV6 is true when the session itself is IPv6 — one of the
+	// two signals that make it safe to send this client IPv6 sources (the other is
+	// a CT_MOD_IP_V6 tag in login). Both are set once at construction / login and
+	// then only read.
+	peerIP      net.IP
+	connectedV6 bool
+	// ipv6Capable is set at login to connectedV6 || the client sent a CT_MOD_IP_V6
+	// tag. Only read by this connection's own request handlers, so it needs no
+	// lock. It gates whether this session may receive IPv6 sentinel sources.
+	ipv6Capable bool
+
 	// infoMu guards info, logged and hasLowID. The connection's own goroutine
 	// writes them during login, but two other goroutines read them: the periodic
 	// status ticker (logged) and any peer handling OP_CALLBACKREQUEST, which
@@ -222,12 +275,22 @@ func (c *tcpClient) isLogged() bool {
 
 func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpClient {
 	host := ""
+	var peerIP net.IP
 	if addr := conn.RemoteAddr(); addr != nil {
 		host = splitHost(addr.String())
+		if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+			peerIP = NormalizeIP(tcpAddr.IP)
+		}
 	}
-	ipv4, err := IPv4ToInt32LE(host)
-	if err != nil {
-		ipv4 = 0
+	// Take the address straight from net.Addr rather than re-parsing the host
+	// string: on a dual-stack listener an IPv4 peer arrives as ::ffff:a.b.c.d,
+	// which NormalizeIP collapses to plain IPv4, and a genuine v6 peer keeps its
+	// 16 bytes. ipv4 is 0 for a v6-only peer (no HighID exists for it); connectedV6
+	// records that the session itself is IPv6, one of the two v6-capability signals.
+	ipv4, _ := IPv4ToUint32LE(peerIP)
+	connectedV6 := false
+	if _, ok := IPv6Bytes(peerIP); ok {
+		connectedV6 = true
 	}
 	packet := NewPacket()
 	var crypt *TCPCrypt
@@ -236,13 +299,15 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 	}
 	enableTCPKeepAlive(conn, defaultTCPKeepAlivePeriod)
 	return &tcpClient{
-		server:     server,
-		conn:       conn,
-		packet:     packet,
-		crypt:      crypt,
-		module:     tcpModule(enableCrypt),
-		hasLowID:   true,
-		remoteHost: host,
+		server:      server,
+		conn:        conn,
+		packet:      packet,
+		crypt:       crypt,
+		module:      tcpModule(enableCrypt),
+		hasLowID:    true,
+		remoteHost:  host,
+		peerIP:      peerIP,
+		connectedV6: connectedV6,
 		info: storage.ClientInfo{
 			IPv4:  ipv4,
 			ID:    0,
@@ -426,6 +491,14 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		c.handleGetSources(data, false)
 	case OpGetSourcesObfu:
 		c.handleGetSources(data, true)
+	case OpGetSourcesIPv6:
+		// Unhandled (falls to the default log) unless we publish v6 sources, so a
+		// disabled server behaves exactly as before for this opcode too.
+		if c.server.publishV6Sources() {
+			c.handleGetSourcesIPv6(data)
+		} else {
+			logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x (ipv6 publish off)", c.remoteHost, opcode)
+		}
 	case OpSearchRequest:
 		c.handleSearchRequest(data)
 	case OpCallbackRequest:
@@ -467,6 +540,24 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		return
 	}
 
+	// Resolve the client's public IPv6 and its capability, but only when IPv6 is
+	// enabled — otherwise the session behaves exactly as before, with no v6 parsed,
+	// stored, or advertised. The address is the CT_MOD_IP_V6 tag when present (the
+	// client's preferred public v6), else the connecting address if the session
+	// itself is IPv6. ipv6Capable — used later to gate sentinel sources — is true
+	// if either signal is present.
+	var v6Bytes []byte
+	if c.server.ipv6Enabled() {
+		var sentV6Tag bool
+		v6Bytes, sentV6Tag = loginIPv6(req.Tags)
+		if v6Bytes == nil && c.connectedV6 {
+			if pb, ok := IPv6Bytes(c.peerIP); ok && IsPublicIPv6(c.peerIP) {
+				v6Bytes = append([]byte(nil), pb[:]...)
+			}
+		}
+		c.ipv6Capable = c.connectedV6 || sentV6Tag
+	}
+
 	c.infoMu.Lock()
 	c.info.Hash = req.Hash
 	c.info.ID = req.ID
@@ -474,11 +565,30 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// Record the client's obfuscation capabilities so OP_FOUNDSOURCES_OBFU can
 	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
+	c.info.IPv6 = v6Bytes
 	ipv4, port := c.info.IPv4, c.info.Port
 	c.infoMu.Unlock()
 
-	firewalled := c.server.isFirewalled(c)
-	logging.Debugf("login decision remote=%s requestedID=%d firewalled=%t", c.remoteHost, req.ID, firewalled)
+	// Kick off the IPv6 reachability probe concurrently with the IPv4 firewall
+	// probe below. The two are independent blocking dial-backs on the login path,
+	// so running them serially doubled worst-case login latency for a dual-stack
+	// client — the common eMuleAI case: connects over IPv4, advertises
+	// CT_MOD_IP_V6. The probe reads only already-settled info (IPv6, Port), so it
+	// races nothing. Only started when an actual dial is needed; a v6-connected or
+	// probe-disabled client trusts the address as reachable.
+	needV6Probe := c.server.publishV6Sources() && len(v6Bytes) == 16 && !c.connectedV6 && c.server.TCP.ProbeIPv6
+	var v6ProbeResult chan bool
+	if needV6Probe {
+		v6ProbeResult = make(chan bool, 1)
+		go func() { v6ProbeResult <- c.server.probeIPv6Reachable(c) }()
+	}
+
+	// A client with no usable IPv4 cannot receive a HighID — the ClientID field is
+	// 32 bits and a HighID is the packed IPv4, so ID would be 0. Force LowID and
+	// skip the pointless IPv4 dial-back (isFirewalled would dial 0.0.0.0:port).
+	firewalled := ipv4 == 0 || c.server.isFirewalled(c)
+	logging.Debugf("login decision remote=%s requestedID=%d firewalled=%t hasIPv6=%t ipv6Capable=%t",
+		c.remoteHost, req.ID, firewalled, len(v6Bytes) == 16, c.ipv6Capable)
 	if firewalled {
 		c.infoMu.Lock()
 		c.hasLowID = true
@@ -486,12 +596,13 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		c.infoMu.Unlock()
 		c.sendServerMessage(c.server.TCP.MessageLowID)
 
-		// AddByEndpoint publishes this *tcpClient into a table other goroutines
-		// read. IPv4 and Port are already settled above, which is what those
-		// readers use; the ID that comes back is written under infoMu below, so
-		// a concurrent reader sees either the old or the new value, never a torn
-		// one.
-		id, ok := c.server.LowIDs.AddByEndpoint(ipv4, port, c)
+		// AddByAddress publishes this *tcpClient into a table other goroutines
+		// read. The address+port seed only affects LowID distribution; keying on
+		// the full connecting address rather than the 32-bit IPv4 keeps v6-only
+		// clients (all of whom have ipv4 == 0) from colliding on one seed. The ID
+		// that comes back is written under infoMu below, so a concurrent reader
+		// sees either the old or the new value, never a torn one.
+		id, ok := c.server.LowIDs.AddByAddress(c.peerIP, ipv4, port, c)
 		if !ok {
 			c.closeWithReason("lowid-pool-exhausted")
 			return
@@ -506,8 +617,26 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		c.info.ID = c.info.IPv4
 		c.infoMu.Unlock()
 	}
+
+	// Record the IPv6 reachability verdict, joining the concurrent probe if one was
+	// started. A v6-connected or probe-disabled client trusts the address as
+	// reachable (reachable stays true). The verdict is independent of the IPv4
+	// firewall decision above.
+	if c.server.publishV6Sources() && len(v6Bytes) == 16 {
+		reachable := true
+		if needV6Probe {
+			reachable = <-v6ProbeResult
+		}
+		c.infoMu.Lock()
+		c.info.IPv6Reachable = reachable
+		c.infoMu.Unlock()
+		logging.Debugf("ipv6 reachability remote=%s ipv6=%s reachable=%t connectedV6=%t",
+			c.remoteHost, net.IP(v6Bytes).String(), reachable, c.connectedV6)
+	}
+
 	info := c.snapshotInfo()
-	logging.Infof("login accepted remote=%s assignedID=%d lowID=%t port=%d", c.remoteHost, info.ID, info.LowID, info.Port)
+	logging.Infof("login accepted remote=%s assignedID=%d lowID=%t port=%d ipv6Reachable=%t",
+		c.remoteHost, info.ID, info.LowID, info.Port, info.IPv6Reachable)
 	c.handShake()
 }
 
@@ -627,33 +756,64 @@ func (c *tcpClient) handleGetServerList() {
 }
 
 func (c *tcpClient) handleGetSources(data *Buffer, obfuscated bool) {
-	hash := append([]byte(nil), data.Get(16)...)
-	if len(hash) != 16 {
-		logging.Warnf("get sources parse failed remote=%s opcode=%s err=invalid-hash-len", c.remoteHost, opNameGetSources(obfuscated))
+	hash, fileSize, ok := c.parseGetSources(data, opNameGetSources(obfuscated))
+	if !ok {
 		return
+	}
+	sources := c.server.Storage.GetSources(hash, fileSize)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
+	// A v6-capable session (connected over IPv6, or having sent CT_MOD_IP_V6) can
+	// parse the sentinel, so IPv6-only sources are published to it inline. Every
+	// other session gets the byte-identical classic layout. Sent even when empty,
+	// matching the original's unconditional reply.
+	format := FormatClassic
+	if c.server.publishV6Sources() && c.ipv6Capable {
+		format = FormatSentinel
+	}
+	c.sendFoundSources(hash, sources, obfuscated, format)
+}
+
+// handleGetSourcesIPv6 answers OP_GETSOURCES_IPV6 (0x24) with the richer
+// tag-block format. Sending this opcode is itself the opt-in, so the reply is
+// safe regardless of the sentinel-capability signals.
+func (c *tcpClient) handleGetSourcesIPv6(data *Buffer) {
+	hash, fileSize, ok := c.parseGetSources(data, "OP_GETSOURCES_IPV6")
+	if !ok {
+		return
+	}
+	sources := c.server.Storage.GetSources(hash, fileSize)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSOURCES_IPV6 sourcesFound=%d", c.remoteHost, len(sources))
+	packet, err := BuildFoundSourcesIPv6Packet(hash, sources)
+	if err != nil {
+		return
+	}
+	_ = c.writePacket(packet)
+}
+
+// parseGetSources reads the shared OP_GETSOURCES* payload: a 16-byte file hash
+// and the file size (a zero uint32 signals a following uint64 for large files).
+func (c *tcpClient) parseGetSources(data *Buffer, opName string) (hash []byte, fileSize uint64, ok bool) {
+	hash = append([]byte(nil), data.Get(16)...)
+	if len(hash) != 16 {
+		logging.Warnf("get sources parse failed remote=%s opcode=%s err=invalid-hash-len", c.remoteHost, opName)
+		return nil, 0, false
 	}
 	size, err := data.GetUInt32LE()
 	if err != nil {
-		logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opNameGetSources(obfuscated), err)
-		return
+		logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opName, err)
+		return nil, 0, false
 	}
-	fileSize := uint64(size)
+	fileSize = uint64(size)
 	if fileSize == 0 {
 		v, err := data.GetUInt64LE()
 		if err != nil {
-			logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opNameGetSources(obfuscated), err)
-			return
+			logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opName, err)
+			return nil, 0, false
 		}
 		fileSize = v
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d",
-		c.remoteHost, opNameGetSources(obfuscated), hash, fileSize)
-	sources := c.server.Storage.GetSources(hash, fileSize)
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
-	// Sent even when empty, matching the original's unconditional reply. Unlike
-	// OP_SEARCHRESULT this fixes no client-side stall — OP_FOUNDSOURCES has no
-	// timeout in eMule — but it keeps the two TCP reply paths symmetrical.
-	c.sendFoundSources(hash, sources, obfuscated)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d", c.remoteHost, opName, hash, fileSize)
+	return hash, fileSize, true
 }
 
 func (c *tcpClient) handleSearchRequest(data *Buffer) {
@@ -702,14 +862,17 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	}
 }
 
-func (c *tcpClient) sendFoundSources(hash []byte, sources []storage.Source, obfuscated bool) {
+func (c *tcpClient) sendFoundSources(hash []byte, sources []storage.Source, obfuscated bool, format SourceFormat) {
 	var (
 		packet *Buffer
 		err    error
 	)
-	if obfuscated {
+	switch {
+	case format == FormatSentinel:
+		packet, err = BuildFoundSourcesSentinelPacket(hash, sources, obfuscated)
+	case obfuscated:
 		packet, err = BuildFoundSourcesObfuPacket(hash, sources)
-	} else {
+	default:
 		packet, err = BuildFoundSourcesPacket(hash, sources)
 	}
 	if err != nil {
@@ -768,6 +931,7 @@ func (c *tcpClient) sendServerIdent() {
 		Hash:        c.server.TCP.Hash,
 		TCPPort:     c.server.TCP.Port,
 		TCPFlags:    c.server.TCP.Flags,
+		IPv6:        c.server.TCP.ServerIPv6,
 	})
 	if err != nil {
 		return
@@ -1093,26 +1257,52 @@ func (s *ServerRuntime) isFirewalled(client *tcpClient) bool {
 		return true
 	}
 	if s.TCP.SupportCrypt {
-		ok, err := s.probeClient(client, true)
+		ok, err := s.probeClient(client, true, "tcp4", client.remoteHost)
 		if err == nil && ok {
 			return false
 		}
 	}
-	ok, err := s.probeClient(client, false)
+	ok, err := s.probeClient(client, false, "tcp4", client.remoteHost)
 	return err != nil || !ok
 }
 
-func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool) (bool, error) {
+// probeIPv6Reachable dials the client's advertised public IPv6 and completes a
+// hello exchange, mirroring isFirewalled but over tcp6. The verdict is
+// independent of the IPv4 firewall state: a client can be IPv4-firewalled and
+// still directly reachable over IPv6 (or vice versa). Only a reachable IPv6 is
+// published as a source, so an unreachable address does not cost every other peer
+// a failed connection attempt.
+func (s *ServerRuntime) probeIPv6Reachable(client *tcpClient) bool {
+	if client == nil {
+		return false
+	}
+	info := client.snapshotInfo()
+	if len(info.IPv6) != 16 || info.Port == 0 {
+		return false
+	}
+	host := net.IP(info.IPv6).String()
+	if s.TCP.SupportCrypt {
+		if ok, err := s.probeClient(client, true, "tcp6", host); err == nil && ok {
+			return true
+		}
+	}
+	ok, err := s.probeClient(client, false, "tcp6", host)
+	return err == nil && ok
+}
+
+func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network, host string) (bool, error) {
 	info := client.snapshotInfo()
 	if info.Port == 0 {
 		return false, fmt.Errorf("client port is 0")
 	}
-	addr := net.JoinHostPort(client.remoteHost, fmt.Sprintf("%d", info.Port))
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", info.Port))
 	dialer := net.Dialer{Timeout: s.TCP.ConnectionTimeout}
-	if s.TCP.Address != "" && s.TCP.Address != "0.0.0.0" {
-		dialer.LocalAddr = &net.TCPAddr{IP: net.ParseIP(s.TCP.Address)}
+	// Only bind a local source address whose family matches the dial network;
+	// binding a v4 LocalAddr to a tcp6 dial (or vice versa) fails outright.
+	if local := localBindForNetwork(network, s.TCP.Address); local != nil {
+		dialer.LocalAddr = &net.TCPAddr{IP: local}
 	}
-	conn, err := dialer.Dial("tcp4", addr)
+	conn, err := dialer.Dial(network, addr)
 	if err != nil {
 		return false, err
 	}
@@ -1239,6 +1429,9 @@ func writeWithDeadline(conn net.Conn, data []byte, timeout time.Duration) error 
 }
 
 func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+	// A query that arrived over IPv6 comes from a v6-capable sender, so IPv6-only
+	// sources may ride the sentinel form. An IPv4 query gets the classic layout.
+	format := s.udpSourceFormat(remote)
 	for b.Pos()+16 <= len(b.Bytes()) {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
@@ -1248,7 +1441,7 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *
 		if len(sources) == 0 {
 			continue
 		}
-		packet, err := BuildGlobFoundSourcesPacket(hash, sources)
+		packet, err := buildGlobFoundSources(hash, sources, format)
 		if err != nil {
 			continue
 		}
@@ -1257,6 +1450,7 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *
 }
 
 func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+	format := s.udpSourceFormat(remote)
 	for b.Pos()+20 <= len(b.Bytes()) {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
@@ -1278,7 +1472,7 @@ func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn 
 		if len(sources) == 0 {
 			continue
 		}
-		packet, err := BuildGlobFoundSourcesPacket(hash, sources)
+		packet, err := buildGlobFoundSources(hash, sources, format)
 		if err != nil {
 			continue
 		}
@@ -1286,29 +1480,115 @@ func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn 
 	}
 }
 
+// udpGlobGetSourcesIPv6 answers OP_GLOBGETSOURCES_IPV6 (0xa5) with the tag-block
+// format. Payload matches OP_GLOBGETSOURCES2 (repeated hash+size). Sending this
+// opcode is the opt-in, so the extended reply is safe on any arrival family.
+func (s *ServerRuntime) udpGlobGetSourcesIPv6(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+	for b.Pos()+20 <= len(b.Bytes()) {
+		hash := append([]byte(nil), b.Get(16)...)
+		if len(hash) != 16 {
+			return
+		}
+		size, err := b.GetUInt32LE()
+		if err != nil {
+			return
+		}
+		fileSize := uint64(size)
+		if fileSize == 0 {
+			v, err := b.GetUInt64LE()
+			if err != nil {
+				return
+			}
+			fileSize = v
+		}
+		sources := s.Storage.GetSources(hash, fileSize)
+		if len(sources) == 0 {
+			continue
+		}
+		packet, err := BuildGlobFoundSourcesIPv6Packet(hash, sources)
+		if err != nil {
+			continue
+		}
+		_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
+	}
+}
+
+// udpSourceFormat picks the classic or sentinel layout for a UDP source reply.
+// The sentinel is only used when IPv6 publication is enabled and the query
+// arrived over IPv6, so a legacy IPv4 client can never receive it.
+func (s *ServerRuntime) udpSourceFormat(remote *net.UDPAddr) SourceFormat {
+	if s.publishV6Sources() && remoteIsIPv6(remote) {
+		return FormatSentinel
+	}
+	return FormatClassic
+}
+
+// remoteIsIPv6 reports whether a UDP sender's address is a genuine IPv6 (not an
+// IPv4-mapped form).
+func remoteIsIPv6(remote *net.UDPAddr) bool {
+	if remote == nil {
+		return false
+	}
+	_, ok := IPv6Bytes(remote.IP)
+	return ok
+}
+
 func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
 	challenge, err := b.GetUInt32LE()
 	if err != nil {
 		return
 	}
-	// Cached: this handler is unauthenticated and unthrottled, so serving it
-	// straight from the database made a status flood cost two full table scans
-	// per datagram.
+	packet, err := s.buildStatRes(challenge, crypt.ServerKey)
+	if err != nil {
+		return
+	}
+	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
+}
+
+// buildStatRes builds the OP_GLOBSERVSTATRES reply for a challenge, shared by the
+// plaintext stat request and the obfuscated crypt-ping bootstrap. udpKey is the
+// per-client obfuscation key (deriveUDPKey), advertised at reply offset +36 so
+// the client adopts it for its own obfuscated traffic. The counts are cached:
+// both callers are unauthenticated and unthrottled, so serving them straight
+// from the database made a status flood cost two full table scans per datagram.
+func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32) (*Buffer, error) {
 	clients, files := s.counters.Counts()
-	packet, err := BuildGlobServStatResPacket(challenge, UDPConfig{
+	return BuildGlobServStatResPacket(challenge, UDPConfig{
 		Name:           s.UDP.Name,
 		Description:    s.UDP.Description,
 		DynIP:          s.UDP.DynIP,
 		UDPFlags:       s.UDP.UDPFlags,
 		UDPPortObf:     s.UDP.UDPPortObf,
 		TCPPortObf:     s.UDP.TCPPortObf,
-		UDPServerKey:   s.UDP.UDPServerKey,
+		UDPServerKey:   udpKey,
 		MaxConnections: s.UDP.MaxConnections,
 	}, clients, files, int(s.LowIDs.Count()))
+}
+
+// udpCryptPingReply answers a server-UDP crypt-ping (see the call site in
+// UDPHandler). The client sent a raw 32-bit challenge to the obfuscated port
+// before it holds our UDP key; it decrypts this reply with baseKey = challenge
+// (magic MAGICVALUE_UDP_SERVERCLIENT 0xA5) and reads the real key at +36
+// (srchybrid/UDPSocket.cpp:159-171,377-407). So the reply is encrypted keyed on
+// the challenge — not the per-client key — and written straight to the socket
+// rather than through udpSend, which would re-encrypt with the per-client key.
+// udpKey is the per-client key (deriveUDPKey) the reply carries at +36 for the
+// client to adopt afterward.
+func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn *net.UDPConn, udpKey uint32, module string) {
+	challenge, err := NewBufferFromBytes(data).GetUInt32LE()
+	if err != nil || challenge == 0 {
+		// eMule never sends a zero challenge (srchybrid/ServerList.cpp:280-281) and
+		// checks challenge != 0 before decrypting the reply, so a zero-keyed reply
+		// would be unusable — treat it as junk.
+		return
+	}
+	packet, err := s.buildStatRes(challenge, udpKey)
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
+	reply := NewUDPCrypt(true, challenge).Encrypt(packet.Bytes())
+	LogUDPRaw(module, "send", remote.String(), reply)
+	_, _ = conn.WriteToUDP(reply, remote)
 }
 
 func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
@@ -1479,6 +1759,19 @@ func opNameGetSources(obfuscated bool) string {
 	return "OP_GETSOURCES"
 }
 
+// cryptPingMaxLen bounds a server-UDP crypt-ping: eMule sends a 4-byte challenge
+// plus up to 15 random padding bytes (srchybrid/ServerList.cpp:277).
+const cryptPingMaxLen = 4 + 15
+
+// isCryptPing reports whether an undecryptable datagram on the obfuscated UDP
+// listener is short enough to be a raw crypt-ping challenge. Length is the only
+// signal available — the challenge is random bytes with no framing — but a false
+// positive only costs one stat-reply datagram, on par with the plaintext
+// OP_GLOBSERVSTATREQ this server already answers unthrottled.
+func isCryptPing(data []byte) bool {
+	return len(data) >= 4 && len(data) <= cryptPingMaxLen
+}
+
 func formatNamedTags(tags []NamedTag, limit int) string {
 	if len(tags) == 0 {
 		return "[]"
@@ -1541,6 +1834,56 @@ func loginFlags(tags []NamedTag) uint32 {
 		return 0
 	}
 	return 0
+}
+
+// localBindForNetwork returns the configured bind address as a source IP for an
+// outbound probe, but only when its family matches the dial network and it is not
+// a wildcard. A mismatched or wildcard bind returns nil so the dialer picks the
+// source itself.
+func localBindForNetwork(network, address string) net.IP {
+	if address == "" || address == "0.0.0.0" || address == "::" {
+		return nil
+	}
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return nil
+	}
+	isV4 := ip.To4() != nil
+	switch network {
+	case "tcp4":
+		if isV4 {
+			return ip
+		}
+	case "tcp6":
+		if !isV4 {
+			return ip
+		}
+	}
+	return nil
+}
+
+// loginIPv6 extracts the client's public IPv6 from the CT_MOD_IP_V6 (0xae) login
+// tag, which decodes as a 16-byte hash value (tag name "ipv6"). It returns the
+// validated public address bytes (nil if absent or not globally routable) and a
+// separate present flag: the *presence* of the tag — even with an unusable value
+// — signals the client understands the IPv6 source formats, which is what gates
+// sending it sentinel sources. eMuleAI ServerConnect.cpp:220-223.
+func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
+	for _, t := range tags {
+		if t.Name != "ipv6" {
+			continue
+		}
+		present = true
+		b, ok := t.Value.([]byte)
+		if !ok || len(b) != 16 {
+			return nil, true
+		}
+		if !IsPublicIPv6(net.IP(b)) {
+			return nil, true
+		}
+		return append([]byte(nil), b...), true
+	}
+	return nil, false
 }
 
 // cryptOptionsFromLoginFlags maps the login capability bits to the per-source

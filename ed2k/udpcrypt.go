@@ -1,5 +1,10 @@
 package ed2k
 
+import (
+	"encoding/binary"
+	"net"
+)
+
 const (
 	MagicValueUDPServerClient = 0xA5
 	MagicValueUDPClientServer = 0x6B
@@ -95,4 +100,29 @@ func (u *UDPCrypt) Encrypt(buffer []byte) []byte {
 	_ = out.PutUInt16LE(randomKey)
 	out.PutBuffer(encrypted)
 	return out.Bytes()
+}
+
+// deriveUDPKey returns the per-client server-UDP obfuscation key: MD5(secret ‖
+// clientIP) folded to a uint32. Binding the key to the source IP restores the
+// anti-spoofing property a single global key gave up — eMule re-pings for a
+// fresh key once its public IP changes (CServer::GetServerKeyUDP returns 0,
+// srchybrid/Server.cpp:279-291). The value is opaque to the client (it stores
+// and echoes whatever we send at reply offset +36), so any deterministic per-IP
+// derivation works; being deterministic, the server recomputes the same key on
+// every datagram from that IP with no per-client state. Keyed on IP only, not
+// port, so a NAT port change does not invalidate it. Never returns 0 — a zero
+// key means "no key" to the client (srchybrid/Server.cpp:281) and it would
+// refuse to obfuscate.
+func deriveUDPKey(secret uint32, ip net.IP) uint32 {
+	var seed [4]byte
+	binary.LittleEndian.PutUint32(seed[:], secret)
+	norm := ip
+	if v4 := ip.To4(); v4 != nil {
+		norm = v4 // stable 4-byte form; v6 falls through to the 16-byte value
+	}
+	key := binary.LittleEndian.Uint32(MD5(append(seed[:], norm...)))
+	if key == 0 {
+		key = 1
+	}
+	return key
 }

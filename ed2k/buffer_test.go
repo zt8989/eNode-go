@@ -157,10 +157,11 @@ func TestGetFileList(t *testing.T) {
 }
 
 func TestGetTagErrorContainsContext(t *testing.T) {
-	// malformed long tag: type=TypeUint32, name-len=2 (expected 1)
-	b := NewBufferFromBytes([]byte{
-		TypeUint32, 0x02, 0x00, 'x', 'y', 0x11, 0x22, 0x33, 0x44,
-	})
+	// malformed long tag: type=TypeUint32, name-len=1, code, but the declared
+	// uint32 value is truncated (only 2 bytes present). The parse must fail with
+	// context at the read-value stage.
+	in := []byte{TypeUint32, 0x01, 0x00, TagSize, 0x11, 0x22}
+	b := NewBufferFromBytes(in)
 	_, err := b.GetTag()
 	if err == nil {
 		t.Fatal("expected error")
@@ -169,9 +170,55 @@ func TestGetTagErrorContainsContext(t *testing.T) {
 	if !errors.As(err, &tagErr) {
 		t.Fatalf("expected TagDecodeError, got %T (%v)", err, err)
 	}
-	if tagErr.Stage != "name-len-ne-1" {
+	if tagErr.Stage != "read-value" {
 		t.Fatalf("unexpected stage: %s", tagErr.Stage)
 	}
+	t.Logf("input: %x -> error stage=%s: %v", in, tagErr.Stage, err)
+}
+
+// TestGetTagStringNamedTagConsumed pins the fix for the login-drop bug: a tag
+// whose name length is not 1 (a textual name) must be consumed and returned
+// rather than aborting the whole list. eMule permits string-named tags, and
+// aborting on one previously dropped otherwise-valid login/offer packets.
+func TestGetTagStringNamedTagConsumed(t *testing.T) {
+	// type=TypeUint32, name-len=2, name="xy", value=0x44332211 (LE).
+	in := []byte{TypeUint32, 0x02, 0x00, 'x', 'y', 0x11, 0x22, 0x33, 0x44}
+	b := NewBufferFromBytes(in)
+	tag, err := b.GetTag()
+	if err != nil {
+		t.Fatalf("string-named tag should parse, got: %v", err)
+	}
+	if tag.Name != "xy" {
+		t.Fatalf("name mismatch: got %q want %q", tag.Name, "xy")
+	}
+	v, ok := tag.Value.(uint64)
+	if !ok || v != 0x44332211 {
+		t.Fatalf("value mismatch: got %T %v", tag.Value, tag.Value)
+	}
+	if b.Remaining() != 0 {
+		t.Fatalf("tag not fully consumed: %d bytes left", b.Remaining())
+	}
+	t.Logf("input: %x -> name=%q value=0x%x", in, tag.Name, v)
+}
+
+// TestGetTagHashValue verifies the previously-missing hash tag type (0x01)
+// decodes to 16 bytes — the type CT_MOD_IP_V6 (0xae) rides on.
+func TestGetTagHashValue(t *testing.T) {
+	ipv6 := []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
+	in := append([]byte{TypeHash, 0x01, 0x00, TagModIPv6}, ipv6...)
+	b := NewBufferFromBytes(in)
+	tag, err := b.GetTag()
+	if err != nil {
+		t.Fatalf("hash tag should parse, got: %v", err)
+	}
+	if tag.Name != "ipv6" {
+		t.Fatalf("name mismatch: %q", tag.Name)
+	}
+	got, ok := tag.Value.([]byte)
+	if !ok || !bytes.Equal(got, ipv6) {
+		t.Fatalf("value mismatch: got %T %x", tag.Value, tag.Value)
+	}
+	t.Logf("input: %x -> name=%s value=%x", in, tag.Name, got)
 }
 
 func TestGetTagShortFormatUint16(t *testing.T) {

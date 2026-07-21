@@ -156,13 +156,15 @@ func (m *MongoDBEngine) Connect(info ClientInfo) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	doc := bson.M{
-		"hash":          info.Hash,
-		"id_ed2k":       info.ID,
-		"ipv4":          info.IPv4,
-		"port":          info.Port,
-		"crypt_options": int32(info.CryptOptions),
-		"online":        true,
-		"time_login":    time.Now(),
+		"hash":           info.Hash,
+		"id_ed2k":        info.ID,
+		"ipv4":           info.IPv4,
+		"port":           info.Port,
+		"crypt_options":  int32(info.CryptOptions),
+		"ipv6":           nullableIPv6(info.IPv6),
+		"ipv6_reachable": info.IPv6Reachable,
+		"online":         true,
+		"time_login":     time.Now(),
 	}
 	_, err := m.db.Collection("clients").UpdateOne(
 		ctx,
@@ -941,10 +943,12 @@ func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Sourc
 
 	var docs []struct {
 		Client struct {
-			IDEd2K       uint32 `bson:"id_ed2k"`
-			Port         uint16 `bson:"port"`
-			Hash         []byte `bson:"hash"`
-			CryptOptions uint8  `bson:"crypt_options"`
+			IDEd2K        uint32 `bson:"id_ed2k"`
+			Port          uint16 `bson:"port"`
+			Hash          []byte `bson:"hash"`
+			CryptOptions  uint8  `bson:"crypt_options"`
+			IPv6          []byte `bson:"ipv6"`
+			IPv6Reachable bool   `bson:"ipv6_reachable"`
 		} `bson:"client"`
 	}
 	if err := cur.All(ctx, &docs); err != nil {
@@ -954,10 +958,12 @@ func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Sourc
 	out := make([]Source, 0, len(docs))
 	for _, d := range docs {
 		out = append(out, Source{
-			ID:           d.Client.IDEd2K,
-			Port:         d.Client.Port,
-			UserHash:     append([]byte(nil), d.Client.Hash...),
-			CryptOptions: d.Client.CryptOptions,
+			ID:            d.Client.IDEd2K,
+			Port:          d.Client.Port,
+			UserHash:      append([]byte(nil), d.Client.Hash...),
+			CryptOptions:  d.Client.CryptOptions,
+			IPv6:          append([]byte(nil), d.Client.IPv6...),
+			IPv6Reachable: d.Client.IPv6Reachable,
 		})
 	}
 	return out

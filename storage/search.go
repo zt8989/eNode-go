@@ -3,6 +3,7 @@ package storage
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 type SearchKind int
@@ -68,8 +69,11 @@ var (
 	contradictionNode = whereNode{}
 )
 
-func BuildSearchWhere(expr *SearchExpr) (string, []any) {
-	node := buildSearchNode(expr)
+// BuildSearchWhere renders a search expression to a MySQL/MariaDB WHERE clause.
+// dialect selects the full-text strategy for name terms (DialectMariaDB or
+// DialectMySQL); see ftLeaf. An empty dialect is treated as DialectMariaDB.
+func BuildSearchWhere(expr *SearchExpr, dialect string) (string, []any) {
+	node := buildSearchNode(expr, dialect)
 	// A tree that is entirely unsupported carries no constraint at all. Return
 	// the empty clause so engines keep their existing "no results" guard rather
 	// than running an unfiltered scan.
@@ -79,11 +83,11 @@ func BuildSearchWhere(expr *SearchExpr) (string, []any) {
 	return node.sql, node.args
 }
 
-func buildSearchWhere(expr *SearchExpr) (string, []any) {
-	return BuildSearchWhere(expr)
+func buildSearchWhere(expr *SearchExpr, dialect string) (string, []any) {
+	return BuildSearchWhere(expr, dialect)
 }
 
-func buildSearchNode(expr *SearchExpr) whereNode {
+func buildSearchNode(expr *SearchExpr, dialect string) whereNode {
 	if expr == nil {
 		return prunedNode
 	}
@@ -95,16 +99,10 @@ func buildSearchNode(expr *SearchExpr) whereNode {
 			// distinct from an unsupported tag, and it must not be dropped.
 			return contradictionNode
 		}
-		parts := make([]string, 0, len(terms))
-		args := make([]any, 0, len(terms))
-		for _, t := range terms {
-			parts = append(parts, "s.name LIKE ?")
-			args = append(args, "%"+escapeLike(t)+"%")
-		}
-		return whereNode{sql: "(" + strings.Join(parts, " AND ") + ")", args: args}
+		return ftLeaf(terms, dialect)
 	case SearchString:
 		if expr.TagType == searchTypeText {
-			return buildSearchNode(&SearchExpr{Kind: SearchText, Text: expr.ValueString})
+			return buildSearchNode(&SearchExpr{Kind: SearchText, Text: expr.ValueString}, dialect)
 		}
 		switch expr.TagType {
 		case searchTypeFileType:
@@ -135,7 +133,7 @@ func buildSearchNode(expr *SearchExpr) whereNode {
 			return prunedNode
 		}
 	case SearchAnd, SearchOr, SearchAndNot:
-		return combineWhereNodes(expr.Kind, buildSearchNode(expr.Left), buildSearchNode(expr.Right))
+		return combineWhereNodes(expr.Kind, buildSearchNode(expr.Left, dialect), buildSearchNode(expr.Right, dialect))
 	default:
 		return prunedNode
 	}
@@ -324,4 +322,111 @@ func fileExt(name string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimPrefix(ext, "."))
+}
+
+// ftLeaf builds the WHERE fragment for a group of AND-ed name terms, using the
+// full-text index as the access path instead of a leading-wildcard LIKE scan.
+//
+// Every term's indexable alphanumeric runs go into a single boolean-mode MATCH:
+//
+//	DialectMariaDB — `+run*` prefix operators: word-prefix matching, the only
+//	                 strategy MariaDB can index.
+//	DialectMySQL   — `+"run"` phrase operators over the ngram index: substring
+//	                 candidates, then a residual `s.name LIKE '%term%'` per term
+//	                 pins the exact substring (the MATCH is a superset).
+//
+// A term with no indexable run (every run shorter than the server's minimum
+// token size, e.g. a 1–2 char search) contributes only `s.name LIKE '%term%'`.
+// Because the MATCH is the index access path, a residual/short-term LIKE rides an
+// indexed query; the only leading-`%` scan left is a leaf whose every term is
+// sub-token-size, which is rare and unavoidable (the index cannot tokenize it).
+func ftLeaf(terms []string, dialect string) whereNode {
+	minTok := ftMinTokenSize(dialect)
+
+	var phrases []string // boolean-mode operators, joined into one MATCH probe
+	parts := make([]string, 0, len(terms)+1)
+	args := make([]any, 0, len(terms)+1)
+
+	for _, t := range terms {
+		for _, run := range alnumRuns(t) {
+			if len([]rune(run)) < minTok {
+				continue
+			}
+			phrases = append(phrases, ftPhrase(run, dialect))
+		}
+	}
+	if len(phrases) > 0 {
+		parts = append(parts, "MATCH(s.name) AGAINST (? IN BOOLEAN MODE)")
+		args = append(args, strings.Join(phrases, " "))
+	}
+
+	for _, t := range terms {
+		// The ngram MATCH only narrows to a superset, so every mysql term also
+		// gets an exact-substring LIKE. A mariadb term is fully expressed by its
+		// `+run*` prefixes; only a term with no indexable run needs the LIKE
+		// fallback (and that fallback is the sole sanctioned leading-`%`).
+		if dialect == DialectMySQL || !hasIndexableRun(t, minTok) {
+			parts = append(parts, "s.name LIKE ?")
+			args = append(args, "%"+escapeLike(t)+"%")
+		}
+	}
+
+	return whereNode{sql: "(" + strings.Join(parts, " AND ") + ")", args: args}
+}
+
+// ftMinTokenSize is the shortest term the full-text index can tokenize, which
+// bounds when MATCH can stand in for a LIKE scan. It must track the server
+// setting: ngram_token_size (default 2) for the mysql/ngram index, and
+// innodb_ft_min_token_size (default 3) for the mariadb/word index.
+func ftMinTokenSize(dialect string) int {
+	if dialect == DialectMySQL {
+		return 2
+	}
+	return 3
+}
+
+// ftPhrase renders one alphanumeric run as a required boolean-mode operator. The
+// run holds only letters/digits (alnumRuns strips everything else), so it can
+// carry no boolean operator or quote that would corrupt the AGAINST expression.
+func ftPhrase(run, dialect string) string {
+	if dialect == DialectMySQL {
+		// A quoted phrase forces the bigrams to be adjacent, i.e. a contiguous
+		// substring, rather than merely co-occurring.
+		return `+"` + run + `"`
+	}
+	return "+" + run + "*"
+}
+
+// alnumRuns splits a term into maximal runs of Unicode letters/digits, the
+// delimiters being exactly the characters a full-text tokenizer also drops.
+// Splitting at least as aggressively as the tokenizer keeps the MATCH a superset
+// of the term, so the residual LIKE never has to recover a false negative.
+func alnumRuns(s string) []string {
+	var runs []string
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			continue
+		}
+		if b.Len() > 0 {
+			runs = append(runs, b.String())
+			b.Reset()
+		}
+	}
+	if b.Len() > 0 {
+		runs = append(runs, b.String())
+	}
+	return runs
+}
+
+// hasIndexableRun reports whether a term has any run the full-text index can
+// tokenize, i.e. whether the MATCH already carries it.
+func hasIndexableRun(term string, minTok int) bool {
+	for _, run := range alnumRuns(term) {
+		if len([]rune(run)) >= minTok {
+			return true
+		}
+	}
+	return false
 }

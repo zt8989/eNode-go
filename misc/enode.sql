@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS `clients` (
   -- 0x02 requests, 0x04 requires obfuscation. Parsed from the CT_SERVER_FLAGS
   -- login tag and re-published per source.
   `crypt_options` tinyint(1) unsigned NOT NULL DEFAULT '0',
+  -- Client's public IPv6 as 16 raw network-order bytes, NULL when the client has
+  -- none. ipv6_reachable is set once the server has verified the client answers
+  -- on that address; only a reachable IPv6 is published as a source.
+  `ipv6` binary(16) DEFAULT NULL,
+  `ipv6_reachable` tinyint(1) NOT NULL DEFAULT '0',
   `time_login` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `online` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
@@ -104,7 +109,15 @@ CREATE TABLE IF NOT EXISTS `sources` (
   KEY `online_time_offer` (`online`,`time_offer`),
   KEY `complete` (`complete`),
   KEY `ext` (`ext`),
-  KEY `type` (`type`)
+  KEY `type` (`type`),
+  -- Full-text index backing name search, so OP_SEARCHREQUEST uses an index
+  -- instead of a leading-wildcard `LIKE '%term%'` table scan. This baseline is
+  -- the plain word parser, portable to MariaDB 10.0.5+ and MySQL 5.6.4+, and it
+  -- gives word-prefix matching (dialect: mariadb). On MySQL the engine
+  -- specializes it to `WITH PARSER ngram` for substring matching on first connect
+  -- (dialect: mysql, MySQL 5.7.6+); see specializeFulltextIndex. Keeping the index
+  -- here means a manually-applied schema still answers MATCH on either server.
+  FULLTEXT KEY `name_ft` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
