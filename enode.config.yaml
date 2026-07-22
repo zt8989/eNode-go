@@ -54,6 +54,8 @@ udp:
 natTraversal:
   enabled: true
   port: 2004
+  ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
+  serverIndependent: true    # cross-server / serverless LowID↔LowID rendezvous (default on)
   registrationTTLSeconds: 30
 
 # IPv6 dual-stack support. When enabled (the default), the TCP/UDP listeners bind

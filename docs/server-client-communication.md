@@ -64,14 +64,29 @@ sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000
 
 ## NAT Traversal UDP OP Codes (`PR_NAT = 0xf1`)
 
+`PR_NAT` is a UDP hole-punch rendezvous, **dual-stack**: the server stores up to two
+candidates per client hash (one IPv4, one IPv6 — the observed source of each register)
+and, when pairing, prefers IPv6 when both peers have a v6 candidate, else IPv4. All
+endpoint fields are **big-endian**. IPv6 hole-punching is gated by `natTraversal.ipv6`
+(default on, needs `ipv6.enabled`); when off, IPv6 `PR_NAT` datagrams are declined and
+the family is IPv4-only. The registry is keyed by user hash and is **login-independent**:
+`natTraversal.serverIndependent` (default on) makes the server pair two registered
+clients regardless of which eD2K server (if any) they are on — cross-server / serverless
+LowID↔LowID — and advertise it via `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` plus a
+`ST_NAT_PORT (0x9d)` uint16 tag in `OP_SERVERIDENT`; when off, pairing is restricted to
+clients logged into this server (`OP_NAT_FAILED` reason `0x03`). Full protocol + byte-exact
+layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §9.
+
 | OP constant | Hex | Direction | Meaning |
 |---|---:|---|---|
-| `OP_NAT_REGISTER` | `0xe4` | Client -> NAT Server | Register/refresh client hash and observed endpoint. |
-| `OP_NAT_REGISTER` | `0xe4` | NAT Server -> Client | Register ACK with server endpoint (`port(2, BE) + ip(4, BE)`). |
+| `OP_NAT_REGISTER` | `0xe4` | Client -> NAT Server | Register/refresh client hash; server records the observed endpoint in its v4/v6 slot. |
+| `OP_NAT_REGISTER` | `0xe4` | NAT Server -> Client | v4 register ACK with server endpoint (`port(2, BE) + ip(4, BE)`). |
+| `OP_NAT_REGISTER_IPV6` | `0xec` | NAT Server -> Client | v6 register ACK with server endpoint (`port(2, BE) + ipv6(16)`). |
 | `OP_NAT_SYNC2` | `0xe9` | Client -> NAT Server | Ask server to pair source hash with target hash (`srcHash(16)+connAck(4)+dstHash(16)`). |
-| `OP_NAT_SYNC` | `0xe1` | NAT Server -> Client | Peer endpoint exchange (`peerIP(4, BE)+peerPort(2, BE)+peerHash(16)+connAck(4)`). |
+| `OP_NAT_SYNC` | `0xe1` | NAT Server -> Client | v4 peer endpoint exchange (`peerIP(4, BE)+peerPort(2, BE)+peerHash(16)+connAck(4)`). |
+| `OP_NAT_SYNC_IPV6` | `0xed` | NAT Server -> Client | v6 peer endpoint exchange (`peerIPv6(16)+peerPort(2, BE)+peerHash(16)+connAck(4)+version(1)`). |
 | `OP_NAT_PING` | `0xe2` | NAT Server -> Client | NAT keepalive ACK ping (empty payload) after accepted keepalive. |
-| `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered). |
+| `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered, `0x02` = no common address family, `0x03` = rendezvous restricted — server-independent off and a peer not logged in here). |
 | `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen` and receives `OP_NAT_PING` when endpoint is registered. |
 | keepalive (non-`PR_NAT`, legacy) | n/a | Client -> NAT Server | Legacy raw 1-byte UDP heartbeat; still accepted and receives `OP_NAT_PING` when endpoint is registered. |
 
@@ -95,7 +110,7 @@ sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000
 | `OP_SERVERMESSAGE` | Server -> Client | `message(string)` |
 | `OP_SERVERSTATUS` | Server -> Client | `clients(uint32) + files(uint32)` |
 | `OP_IDCHANGE` | Server -> Client | `clientID(uint32) + tcpFlags(uint32)` |
-| `OP_SERVERLIST` | Server -> Client | `serverCount(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` |
+| `OP_SERVERLIST` | Server -> Client | `v4count(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` [`+ v6count(uint8) + repeated(serverIPv6(hash16) + serverPort(uint16))`]. The trailing IPv6 block is appended only when IPv6 publication is on and a peer server has a public IPv6; it is pure trailing data after the self-terminating v4 count, so a v4-only client ignores it. See [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §8. |
 | `OP_SERVERIDENT` | Server -> Client | `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags` |
 | `OP_FOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
 | `OP_FOUNDSOURCES_OBFU` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry + obfSettings(uint8) [+ userHash(hash16) if obfSettings&0x80])` |
@@ -128,7 +143,7 @@ offset +36; see [server-udp-crypt-ping.md](server-udp-crypt-ping.md).
 | `OP_NAT_REGISTER` (server -> client) | `serverPort(uint16, BE) + serverIP(uint32, BE)` |
 | `OP_NAT_SYNC2` | `srcHash(hash16) + connAck(uint32) + dstHash(hash16)` |
 | `OP_NAT_SYNC` | `peerIP(uint32, BE) + peerPort(uint16, BE) + peerHash(hash16) + connAck(uint32)` |
-| `OP_NAT_FAILED` | `reason(uint8) + targetHash(hash16)` (implemented reason: `0x01`) |
+| `OP_NAT_FAILED` | `reason(uint8) + targetHash(hash16)` (reasons: `0x01` not registered, `0x02` no common family, `0x03` rendezvous restricted) |
 | `OP_NAT_KEEPALIVE` | Empty payload (`payloadLen=0`) |
 | `OP_NAT_PING` | Empty payload (`payloadLen=0`) |
 | legacy keepalive (non-`PR_NAT`) | Raw single-byte UDP packet (no NAT envelope/opcode) |

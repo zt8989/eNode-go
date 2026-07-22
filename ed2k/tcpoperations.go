@@ -16,6 +16,10 @@ type ServerConfig struct {
 	// IPv6 is the server's own public IPv6 (16 network-order bytes), advertised as
 	// a CT_MOD_SVR_IP_V6 (0xaf) hash tag in OP_SERVERIDENT. Empty omits the tag.
 	IPv6 []byte
+	// NatPort is the server's NAT-rendezvous UDP port, advertised as a TagNatPort
+	// (0x9d) uint16 tag in OP_SERVERIDENT so a client learns where to REGISTER/SYNC2.
+	// Zero omits the tag (feature off or NAT disabled).
+	NatPort uint16
 }
 
 type LoginRequest struct {
@@ -195,30 +199,81 @@ func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
-func BuildServerListPacket(servers []storage.Server) (*Buffer, error) {
-	// Same single-byte count as the source lists, and ServersAll() is unbounded.
-	if len(servers) > storage.MaxWireSources {
-		servers = servers[:storage.MaxWireSources]
+// BuildServerListPacket builds OP_SERVERLIST (0x32). The classic block is
+// <v4count:uint8> followed by v4count × <ip:uint32 LE><port:uint16 LE>. When
+// includeV6 is set and at least one configured server has a public IPv6, a trailing
+// block <v6count:uint8> + v6count × <ipv6:16 network-order><port:uint16 LE> is
+// appended. That trailing block is safe for legacy clients: the classic count is
+// self-terminating, so a v4-only parser stops after v4count entries and ignores the
+// rest. With no v6 servers (or includeV6 false) the packet is byte-identical to the
+// pre-IPv6 form. An unclassifiable entry is skipped, not fatal — a single bad IP no
+// longer silences the whole list.
+func BuildServerListPacket(servers []storage.Server, includeV6 bool) (*Buffer, error) {
+	type v4Entry struct {
+		ip   uint32
+		port uint16
 	}
+	type v6Entry struct {
+		ip   [16]byte
+		port uint16
+	}
+	var v4 []v4Entry
+	var v6 []v6Entry
+	for _, s := range servers {
+		ipv4, ipv6, fam := ClassifyServerIP(s.IP)
+		switch fam {
+		case 4:
+			if len(v4) < storage.MaxWireSources {
+				v4 = append(v4, v4Entry{ip: ipv4, port: s.Port})
+			}
+		case 6:
+			if includeV6 && len(v6) < storage.MaxWireSources {
+				v6 = append(v6, v6Entry{ip: ipv6, port: s.Port})
+			}
+		}
+	}
+
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerList},
-		{Type: TypeUint8, Value: uint8(len(servers))},
+		{Type: TypeUint8, Value: uint8(len(v4))},
 	}
-	for _, s := range servers {
-		ip, err := IPv4ToInt32LE(s.IP)
-		if err != nil {
-			return nil, err
-		}
+	for _, e := range v4 {
 		pack = append(pack,
-			PacketItem{Type: TypeUint32, Value: ip},
-			PacketItem{Type: TypeUint16, Value: s.Port},
+			PacketItem{Type: TypeUint32, Value: e.ip},
+			PacketItem{Type: TypeUint16, Value: e.port},
 		)
+	}
+	if includeV6 && len(v6) > 0 {
+		pack = append(pack, PacketItem{Type: TypeUint8, Value: uint8(len(v6))})
+		for _, e := range v6 {
+			ip := e.ip // copy so the packet item does not alias the loop variable
+			pack = append(pack,
+				PacketItem{Type: TypeHash, Value: ip[:]},
+				PacketItem{Type: TypeUint16, Value: e.port},
+			)
+		}
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {
 		return nil, err
 	}
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
+}
+
+// ClassifyServerIP classifies a configured peer-server address for OP_SERVERLIST.
+// It returns (packed LE uint32, _, 4) for an IPv4 address, (_, 16 network-order
+// bytes, 6) for a globally routable IPv6 address, or (_, _, 0) for anything else
+// (empty, loopback/link-local/ULA v6, or malformed). Built on IPv4ToInt32LE
+// (misc.go) and ParsePublicIPv6 (address.go) so the wire builder and seedServers
+// agree on which entries are advertisable.
+func ClassifyServerIP(ip string) (v4 uint32, v6 [16]byte, fam int) {
+	if n, err := IPv4ToInt32LE(ip); err == nil {
+		return n, v6, 4
+	}
+	if b, ok := ParsePublicIPv6(ip); ok {
+		return 0, b, 6
+	}
+	return 0, v6, 0
 }
 
 func BuildServerStatusPacket(clients, files int) (*Buffer, error) {
@@ -270,6 +325,12 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	// disconnecting, so this is backward-compatible; a v6-aware client reads it.
 	if len(conf.IPv6) == 16 {
 		tags = append(tags, Tag{Type: TypeHash, Code: TagModSvrIPv6, Data: conf.IPv6})
+	}
+	// Advertise the NAT-rendezvous UDP port so a client can REGISTER/SYNC2 for
+	// server-independent hole-punching without assuming the default port. Same
+	// backward-compatible tag loop as the IPv6 tag above — a legacy client ignores it.
+	if conf.NatPort != 0 {
+		tags = append(tags, Tag{Type: TypeUint16, Code: TagNatPort, Data: conf.NatPort})
 	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerIdent},

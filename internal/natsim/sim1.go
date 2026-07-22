@@ -24,6 +24,7 @@ type Sim1Options struct {
 	NATAddr           *net.UDPAddr
 	Hash              [16]byte
 	ListenPort        int
+	ListenIP          net.IP // bind IP; nil = IPv4 wildcard. Pass ::/::1 for a v6 run.
 	Timeout           time.Duration
 	RegisterInterval  time.Duration
 	KeepaliveInterval time.Duration
@@ -57,7 +58,7 @@ func RunSim1(ctx context.Context, o Sim1Options) (Sim1Result, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: o.ListenPort})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: listenIP(o.ListenIP), Port: o.ListenPort})
 	if err != nil {
 		return Sim1Result{}, fmt.Errorf("listen udp: %w", err)
 	}

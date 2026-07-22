@@ -25,6 +25,10 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 | `OP_GLOBGETSOURCES_IPV6` | `0xA5` | client→server, UDP |
 | `OP_GLOBFOUNDSOURCES_IPV6` | `0xA6` | server→client, UDP |
 | `OP_CALLBACKREQUESTED_IPV6` | `0x26` | server→client, TCP |
+| `OP_NAT_REGISTER_IPV6` | `0xEC` (under `PR_NAT 0xF1`) | server→client, UDP |
+| `OP_NAT_SYNC_IPV6` | `0xED` (under `PR_NAT 0xF1`) | server→client, UDP |
+| `SRV_TCPFLG_NAT_RENDEZVOUS` | `0x00008000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
+| `ST_NAT_PORT` (server NAT UDP port) | tag `0x9D`, type `TAGTYPE_UINT16` | `OP_SERVERIDENT` (server→client) |
 
 **Byte order:** every 16-byte IPv6 field is the raw `in6_addr` in network byte
 order (big-endian, the order `inet_pton` produces and a textual `2001:db8::1`
@@ -109,6 +113,13 @@ client with a routable IPv4 still gets a HighID as usual.
   agnostically among the ident tags; unknown tags before/after it must be
   consumed by type and skipped (a `TAGTYPE_HASH` tag is 16 bytes). This is
   informational — you still reach the server on the same address you connected to.
+- **NAT-rendezvous capability.** `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` in the flags
+  word signals the server offers **server-independent** (cross-server / serverless)
+  PR_NAT hole-punch rendezvous (§9): it will pair two registered clients regardless
+  of which eD2K server, if any, they are logged into. When set, `OP_SERVERIDENT` also
+  carries `ST_NAT_PORT (0x9D)`, a `TAGTYPE_UINT16` tag with the server's NAT-rendezvous
+  UDP port (so you need not assume the default `2004`). Both are absent when the
+  operator has turned the feature off; then only same-server LowID↔LowID is served.
 
 ---
 
@@ -198,9 +209,9 @@ v6-only source (`clientId == 0xFFFFFFFF`) is reachable only over IPv6.
 
 ## 6. What the server does not do
 
-- **No IPv6 in NAT traversal.** The `PR_NAT (0xF1)` protocol is IPv4-only; a
-  globally-addressable IPv6 peer does not need it.
-- **No IPv6 in `OP_SERVERLIST`.** Advertised peer servers are IPv4.
+- Nothing NAT-related is scoped out any more: `PR_NAT` hole-punching is dual-stack —
+  see **§9**. (When `natTraversal.ipv6` is set to `false`, the server declines IPv6
+  `PR_NAT` datagrams and the family is IPv4-only, exactly as it was before v6 support.)
 
 ---
 
@@ -249,3 +260,197 @@ address from `0x35`.
 > v6-capable (connected over IPv6, or sent `CT_MOD_IP_V6` at login — §2). A client
 > that is not v6-capable never receives it, and a legacy client drops the unknown
 > `0x26` opcode in its `ProcessPacket` default, so there is no desync risk.
+
+---
+
+## 8. IPv6 peer servers in `OP_SERVERLIST`
+
+`OP_SERVERLIST (0x32)` advertises the other servers this node knows. The classic
+packet is `<v4count:uint8>` then `v4count × (<ip:uint32 LE><port:uint16 LE>)`.
+eNode-go widens it with a **trailing IPv6 block**, appended after the v4 entries:
+
+```
+uint8   v4count
+v4count × ( uint32 ip (LE)   + uint16 port (LE) )      // classic block, unchanged
+uint8   v6count                                         // present only when appended
+v6count × ( uint8[16] ipv6 (network order) + uint16 port (LE) )
+```
+
+The trailing block is emitted only when IPv6 publication is on
+(`ipv6.publishSources`) **and** at least one configured peer server carries a public
+IPv6. When absent, the packet is byte-identical to the classic form — not even a
+zero `v6count` byte is added.
+
+### Why this needs no per-session capability gate
+
+Unlike the source sentinel (§4a), which is *inline* and would desync a v4-only
+parser, the server-list v6 block is pure **trailing data** after a self-terminating
+`uint8` count. A v4-only parser reads exactly `v4count` entries and ignores the
+rest (all three surveyed clients simply debug-dump it), so the same widened packet
+is safe to send to every session. A v6-aware client, after consuming the `v4count`
+entries, checks whether a `<v6count>` byte remains and, if so, reads that many
+`<ipv6:16><port:2>` entries and builds each server from the 16-byte address.
+
+### Configuring v6 peer servers
+
+A `servers[].ip` entry in `enode.config.yaml` may be an IPv4 dotted-quad or a
+**public** IPv6 literal. Non-public v6 (loopback, link-local `fe80::/10`, ULA
+`fc00::/7`) and malformed entries are dropped at load and never advertised.
+
+---
+
+## 9. NAT traversal hole-punching (`PR_NAT`)
+
+`PR_NAT (0xF1)` is a UDP hole-punch rendezvous service: the server relays each of
+two firewalled peers the other's public endpoint so they can punch a hole directly
+to each other. It covers the cases a direct connect or a callback cannot:
+
+- **LowID ↔ LowID (IPv4).** Two peers both behind NAT with no reachable IPv4. The
+  classic callback (`0x35`) needs the *requester* reachable, so it fails when both
+  are LowID. Hole-punching does not.
+- **Firewalled IPv6 ↔ firewalled IPv6.** Two peers each behind a stateful IPv6
+  firewall. Neither can accept an inbound connection, so neither direct-reach nor the
+  `0x26` callback (§7) works. This is the v6 analogue of LowID↔LowID.
+
+This protocol exists only in eNode-go today; no C++ client implements it yet. This
+section is the wire contract to implement against.
+
+### Framing and byte order
+
+Every `PR_NAT` datagram is `[0xF1][size:4 LE = payloadLen+1][opcode:1][payload]` —
+the same envelope as `PR_ED2K`, but with its own opcode namespace (these opcodes are
+interpreted only after the `0xF1` byte, so they do **not** collide with the
+`PR_ED2K` opcodes `0x24/0x25/0x26`). A bare **1-byte** datagram (any value) is a
+legacy keepalive.
+
+> **Byte order is big-endian for every endpoint field in `PR_NAT`** — IP *and*
+> port. This is deliberately unlike the LE convention used elsewhere in eD2K
+> (including the `0x26` callback's LE port). Keep `PR_NAT` internally BE.
+
+### Opcodes
+
+| Opcode | Value | Dir | Meaning |
+|---|---|---|---|
+| `OP_NAT_REGISTER` | `0xE4` | c→s / s→c | register request (hash); also the v4 register **ack** |
+| `OP_NAT_REGISTER_EX` | `0xE3` | c→s | register request carrying a client version byte |
+| `OP_NAT_REGISTER_IPV6` | `0xEC` | s→c | **v6 register ack** (new) |
+| `OP_NAT_KEEPALIVE` | `0xE6` | c→s | keepalive (or a bare 1-byte datagram) |
+| `OP_NAT_PING` | `0xE2` | s→c | keepalive ack |
+| `OP_NAT_SYNC2` | `0xE9` | c→s | pair my hash with a target hash |
+| `OP_NAT_SYNC` | `0xE1` | s→c | peer endpoint, v4 |
+| `OP_NAT_SYNC_EX` | `0xE7` | s→c | peer endpoint, v4, + peer version |
+| `OP_NAT_SYNC_IPV6` | `0xED` | s→c | **peer endpoint, v6** (new) |
+| `OP_NAT_FAILED` | `0xE5` | s→c | pairing failed (reason byte) |
+
+`0xE8/0xEA/0xEB/0xEF` (REPING/DATA/ACK/RST) are reserved and unused by eNode-go.
+
+### Payload layouts (byte-exact)
+
+```
+REGISTER request  (c→s, 0xE4)   hash:16                       [+ legacy stats, ignored]
+REGISTER_EX       (c→s, 0xE3)   hash:16  version:1
+REGISTER ack v4   (s→c, 0xE4)   port:2 BE  ipv4:4 BE                              (6 B)
+REGISTER ack v6   (s→c, 0xEC)   port:2 BE  ipv6:16                               (18 B)
+SYNC2             (c→s, 0xE9)   srcHash:16  connAck:4  dstHash:16                (36 B)
+SYNC v4           (s→c, 0xE1)   peerIPv4:4 BE  peerPort:2 BE  peerHash:16  connAck:4       (26 B)
+SYNC_EX v4        (s→c, 0xE7)   ( SYNC v4 )  peerVersion:1                       (27 B)
+SYNC_IPV6         (s→c, 0xED)   peerIPv6:16  peerPort:2 BE  peerHash:16  connAck:4  peerVersion:1  (39 B)
+FAILED            (s→c, 0xE5)   reason:1  targetHash:16                          (17 B)
+KEEPALIVE         (c→s, 0xE6)   (empty)          |  or a bare 1-byte datagram
+PING              (s→c, 0xE2)   (empty)
+```
+
+- The register ack's `ipv4`/`ipv6` is the **server's own** public endpoint; the port
+  is the UDP port the client should keep talking to. A client distinguishes the v4
+  ack (6 B, opcode `0xE4`) from a register request by direction and length; the v6
+  ack has its own opcode `0xEC`. An **all-zero** ack address means the server has no
+  public address of that family to announce — keep using the address you dialed.
+- `SYNC_IPV6` always carries `peerVersion` (0 if the peer registered without one);
+  there is no separate EX form for v6.
+- `FAILED` reason codes: `0x01` = target hash not registered; `0x02` = the two peers
+  share no address family (e.g. a v4-only peer and a v6-only peer — they cannot
+  punch); `0x03` = rendezvous restricted — the server has server-independent rendezvous
+  turned off and one of the two peers is not logged into it (see *Cross-server /
+  serverless rendezvous* below).
+
+### Dual-stack candidate model
+
+The server stores, **per user hash, up to two candidates** — one IPv4 and one IPv6 —
+each being the source endpoint the server *observed* a register arrive from (it never
+trusts a client-supplied address; NAT rewrites the source, and only the server sees
+the translated public `ip:port`). A dual-stack client therefore **registers once per
+family**: send `OP_NAT_REGISTER` from your IPv4 socket *and* from your IPv6 socket,
+each carrying the same user hash. Each keeps its own freshness (TTL, default 30 s), so
+keepalive on every family you registered.
+
+At `SYNC2` time the server picks a **common family, preferring IPv6**: v6 if both
+peers have a v6 candidate, else v4 if both have v4, else `FAILED 0x02`. So register
+every family you can offer before `SYNC2`; at minimum register on the family of the
+target source (which you already know from the source record).
+
+### Sequence
+
+```
+target T                         server                        initiator I
+  --OP_NAT_REGISTER(hashT)------->  store T.<fam>=src ; ack
+  <-------------- REGISTER ack ----
+  --OP_NAT_KEEPALIVE------------->  refresh ; <--- OP_NAT_PING
+                                                   <--OP_NAT_REGISTER(hashI)--
+                                                   store I.<fam>=src ; ack --->
+                                                   <--OP_NAT_SYNC2(hashI,connAck,hashT)--
+  <-- SYNC/ SYNC_IPV6(peer=I) ----  pick family ; relay ---> SYNC/ SYNC_IPV6(peer=T)
+  ============ direct UDP punch between T and I (both mappings now open) ============
+```
+
+The **punch payload itself is not part of `PR_NAT`** — once each side has the peer's
+endpoint it opens its own eD2K connection to it. (The reference simulator
+`internal/natsim` sends `"PING"`/`"PONG"` there purely to prove reachability.)
+
+### Cross-server / serverless rendezvous
+
+The registry above is keyed by **user hash**, not by eD2K login: registering and
+pairing are independent of whether the two peers are logged into this server, a
+different server, or no server at all. This is what lets `PR_NAT` reach LowID↔LowID
+pairs that the classic same-server callback cannot — the two peers on **different
+servers or none** rendezvous through a common server that runs `PR_NAT`.
+
+**How a client uses it (client side — the discovery half):**
+
+1. **Detect** a rendezvous-capable server: `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` in its
+   flags word, and read `ST_NAT_PORT (0x9D)` from `OP_SERVERIDENT` for the UDP port
+   (fall back to `2004` if absent). This may be a server you are logged into, or any
+   public server you choose as your rendezvous **R**.
+2. A firewalled target **T** registers with **R** (`OP_NAT_REGISTER`, keepalive) and
+   learns **R**'s public endpoint from the REGISTER ack. T then **publishes** the pair
+   `(its user hash, R's ip:port)` to its peers — via Kad or source-exchange, the same
+   channel that carries any other contact info. eNode-go does **not** propagate this;
+   carrying and reading it is the client's responsibility.
+3. An initiator **I** that has learned `(hashT, R)` for a source sends
+   `OP_NAT_SYNC2(hashI, connAck, hashT)` to **R** (SYNC2 auto-registers I's endpoint,
+   so a prior REGISTER is optional). R pairs them exactly as in the sequence above and
+   both punch — regardless of which servers I and T use for file discovery.
+
+This is orthogonal to and independent of the eMuleAI **eServer buddy** relay
+(`OP_ESERVER_* 0xB3–0xBB`), which is a client-to-client, **same-server**, IPv4-only
+mechanism the eD2K server takes no part in. `PR_NAT` is the server-mediated path that
+spans servers and covers IPv6.
+
+**Gate.** `natTraversal.serverIndependent` (default **true**) controls this. When on,
+the server pairs any two registered hashes and advertises the flag + `ST_NAT_PORT`.
+When off, it drops both advertisements and refuses a `SYNC2` unless **both** hashes are
+currently logged into it, replying `OP_NAT_FAILED` reason `0x03`; same-server
+LowID↔LowID still works. The gate is family-agnostic — it applies equally to IPv4 and
+IPv6 pairings, before family selection.
+
+### Configuration
+
+- `natTraversal.enabled` — run the service at all.
+- `natTraversal.port` — its UDP port (default `2004`). The handler is also reachable
+  on the main UDP port.
+- `natTraversal.ipv6` — dual-stack hole-punching (default **true**). Effective only
+  when `ipv6.enabled` is also on. When off, the server **declines** IPv6 `PR_NAT`
+  datagrams (drops them, no ack, nothing stored) and the protocol is IPv4-only.
+- `natTraversal.serverIndependent` — cross-server / serverless rendezvous (default
+  **true**). When off, pairing is restricted to clients logged into this server
+  (`OP_NAT_FAILED` reason `0x03` otherwise) and the capability flag + `ST_NAT_PORT` tag
+  are not advertised.

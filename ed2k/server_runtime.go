@@ -52,6 +52,9 @@ type TCPRuntimeConfig struct {
 	PublishV6Sources bool
 	ProbeIPv6        bool
 	ServerIPv6       []byte
+	// NatRendezvousPort is advertised as the TagNatPort (0x9d) tag in OP_SERVERIDENT
+	// when server-independent rendezvous is on. Zero omits the tag.
+	NatRendezvousPort uint16
 }
 
 type UDPRuntimeConfig struct {
@@ -928,7 +931,9 @@ func (c *tcpClient) sendSearchResult(files []storage.File) {
 
 func (c *tcpClient) sendServerList() {
 	servers := c.server.Storage.ServersAll()
-	packet, err := BuildServerListPacket(servers)
+	// Append the IPv6 peer-server block under the same switch that gates every
+	// other outbound v6 wire extension (the source sentinel, the 0x26 callback).
+	packet, err := BuildServerListPacket(servers, c.server.publishV6Sources())
 	if err != nil {
 		return
 	}
@@ -969,6 +974,7 @@ func (c *tcpClient) sendServerIdent() {
 		TCPPort:     c.server.TCP.Port,
 		TCPFlags:    c.server.TCP.Flags,
 		IPv6:        c.server.TCP.ServerIPv6,
+		NatPort:     c.server.TCP.NatRendezvousPort,
 	})
 	if err != nil {
 		return

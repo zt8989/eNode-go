@@ -34,6 +34,36 @@ func TestServerListSeededFromConfig(t *testing.T) {
 	}
 }
 
+// TestServerListSeedsPublicIPv6 pins that a public IPv6 peer server is seeded (it
+// is advertised in the trailing v6 block of OP_SERVERLIST), while a non-public v6
+// (link-local) and garbage are still skipped.
+func TestServerListSeedsPublicIPv6(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	entries := []config.ServerEntry{
+		{IP: "111.222.111.222", Port: 1234}, // v4 kept
+		{IP: "2001:db8::1", Port: 4661},     // public v6 kept
+		{IP: "fe80::1", Port: 4662},         // link-local v6 skipped
+		{IP: "garbage", Port: 9999},         // invalid skipped
+	}
+	t.Logf("input: %d entries (v4, public v6, link-local v6, garbage)", len(entries))
+	seedServers(engine, entries)
+
+	got := engine.ServersAll()
+	t.Logf("output: %d server(s) seeded: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("want 2 seeded (v4 + public v6), got %d", len(got))
+	}
+	var haveV6 bool
+	for _, s := range got {
+		if s.IP == "2001:db8::1" && s.Port == 4661 {
+			haveV6 = true
+		}
+	}
+	if !haveV6 {
+		t.Fatalf("public IPv6 server not seeded: %+v", got)
+	}
+}
+
 // TestServerListEmptyByDefault confirms an omitted `servers:` seeds nothing — the
 // unchanged default, and correct where the Node original shipped invalid dummies.
 func TestServerListEmptyByDefault(t *testing.T) {

@@ -85,6 +85,18 @@ const (
 	OpNatRst        uint8 = 0xef
 )
 
+// IPv6 NAT-traversal opcodes (eNode-go extension). These are the widened forms of
+// the register-ack and the peer-sync used to hole-punch between two firewalled
+// IPv6 peers — the v6 analogue of the classic IPv4 LowID↔LowID hole-punch. They
+// live in the free PR_NAT (0xf1) opcode space above the classic high-water mark
+// (0xeb, plus 0xef for RST) and are only ever interpreted after the 0xf1 protocol
+// byte, so they never collide with the PR_ED2K opcodes 0x24/0x25/0x26. See
+// docs/ipv6-client-implementation-spec.md §9.
+const (
+	OpNatRegisterIPv6 uint8 = 0xec // server→client REGISTER ack: [port:2 BE][ipv6:16]
+	OpNatSyncIPv6     uint8 = 0xed // server→client: [ipv6:16][port:2 BE][hash:16][connAck:4][version:1]
+)
+
 const (
 	TypeHash   uint8 = 0x01
 	TypeString uint8 = 0x02
@@ -162,6 +174,14 @@ const (
 	// in OP_SERVERIDENT.
 	TagModIPv6    uint8 = 0xae
 	TagModSvrIPv6 uint8 = 0xaf
+	// TagNatPort is an eNode-go OP_SERVERIDENT extension: the server's NAT-rendezvous
+	// UDP port as a uint16, so a client learns where to REGISTER/SYNC2 without
+	// assuming the default 2004. 0x9D is free across the ST_* server-tag, CT_* client
+	// -tag and OP_* opcode namespaces in both surveyed C++ trees (ST_ tags end at
+	// 0x98, CT_ tags start at 0xA0); eMule's OP_SERVERIDENT tag loop consumes unknown
+	// name-IDs without disconnecting. Emitted only when natTraversal.serverIndependent
+	// is on. See docs/ipv6-client-implementation-spec.md §9.
+	TagNatPort uint8 = 0x9d
 )
 
 const (
@@ -191,6 +211,14 @@ const (
 	// ed2kNET's unofficial 0x1000/0x2000 (chacha20/aes256), so 0x4000 is the first
 	// clean bit. Clients ignore unknown bits, so this is display/verify metadata.
 	FlagIPv6 uint32 = 0x4000
+	// FlagNatRendezvous advertises that this server offers server-independent
+	// (cross-server / serverless) PR_NAT hole-punch rendezvous — it will pair two
+	// registered clients regardless of which eD2K server (if any) they are logged
+	// into. 0x8000 is the next clean bit above FlagIPv6 (0x4000); eMule's SrvTcpFlag
+	// word tops out at TCPOBFUSCATION 0x400, so nothing collides. Clients ignore
+	// unknown bits. Advertised only when natTraversal.serverIndependent is on. See
+	// docs/ipv6-client-implementation-spec.md §9.
+	FlagNatRendezvous uint32 = 0x8000
 )
 
 const (

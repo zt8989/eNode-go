@@ -1,0 +1,51 @@
+name: Linux CI
+
+on:
+#  push:
+#    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+#      - name: Run tests (full suite, Docker-backed integration)
+#        run: ENODE_INTEGRATION=1 go test ./...
+
+      - name: Get version
+        run: echo "APP_VERSION=$(git describe --tags --always --dirty)" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          OUT="dist/enode-v${APP_VERSION}-linux-amd64"
+          mkdir -p "$OUT"
+          for c in enode natsim1 natsim2; do
+            go build -trimpath -ldflags="-s -w" -o "$OUT/$c" "./cmd/$c"
+          done
+
+      - name: Bundle
+        run: |
+          OUT="dist/enode-v${APP_VERSION}-linux-amd64"
+          cp enode.config.yaml README.md MIT-LICENSE.txt "$OUT/"
+          tar -C dist -czf "$OUT.tar.gz" "enode-v${APP_VERSION}-linux-amd64"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: enode-v${{ env.APP_VERSION }}-linux-amd64
+          path: dist/enode-v*-linux-amd64.tar.gz

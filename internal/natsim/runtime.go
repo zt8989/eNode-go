@@ -57,6 +57,18 @@ func ParseRegisterEndpoint(payload []byte) (*net.UDPAddr, bool) {
 	}, true
 }
 
+// ParseRegisterEndpointV6 decodes an OP_NAT_REGISTER_IPV6 ack (18 bytes):
+// [port:2 BE][ipv6:16]. An all-zero IPv6 means the server has no public v6 to
+// announce; the caller should keep using the address it dialed.
+func ParseRegisterEndpointV6(payload []byte) (*net.UDPAddr, bool) {
+	if len(payload) < 18 {
+		return nil, false
+	}
+	port := int(payload[0])<<8 | int(payload[1])
+	ip := append(net.IP(nil), payload[2:18]...)
+	return &net.UDPAddr{IP: ip, Port: port}, true
+}
+
 func DispatchNATPacket(
 	raw []byte,
 	onRegister func(endpoint *net.UDPAddr, payload []byte),
@@ -79,6 +91,14 @@ func DispatchNATPacket(
 		}
 	case ed2k.OpNatSyncEx:
 		if info, ok := DecodeSyncPayload(payload); ok && onSync != nil {
+			onSync(info, payload)
+		}
+	case ed2k.OpNatRegisterIPv6:
+		if endpoint, ok := ParseRegisterEndpointV6(payload); ok && onRegister != nil {
+			onRegister(endpoint, payload)
+		}
+	case ed2k.OpNatSyncIPv6:
+		if info, ok := DecodeSyncPayloadV6(payload); ok && onSync != nil {
 			onSync(info, payload)
 		}
 	case ed2k.OpNatFailed:
@@ -106,6 +126,15 @@ func IsPong(data []byte) bool {
 func SendPong(conn *net.UDPConn, remote *net.UDPAddr) error {
 	_, err := conn.WriteToUDP([]byte("PONG"), remote)
 	return err
+}
+
+// listenIP returns the bind IP for a sim's UDP socket, defaulting to the IPv4
+// wildcard so existing callers are unchanged; a v6 run passes net.IPv6zero / ::1.
+func listenIP(ip net.IP) net.IP {
+	if ip == nil {
+		return net.IPv4zero
+	}
+	return ip
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {

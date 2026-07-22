@@ -22,6 +22,9 @@ type TCPServerConfig struct {
 	// advertisement — a dual-stack server is exactly the one that supports IPv6.
 	// False reproduces the original IPv4-only behaviour exactly.
 	DualStack bool
+	// NatRendezvous advertises FlagNatRendezvous (0x8000): this server offers
+	// server-independent (cross-server / serverless) PR_NAT hole-punch rendezvous.
+	NatRendezvous bool
 }
 
 // BuildTCPFlags builds the SRV_TCPFLG_* capability word sent in OP_IDCHANGE and
@@ -42,6 +45,9 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 	}
 	if cfg.DualStack {
 		flags += FlagIPv6
+	}
+	if cfg.NatRendezvous {
+		flags += FlagNatRendezvous
 	}
 	return flags
 }

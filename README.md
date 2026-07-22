@@ -27,10 +27,18 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - gzip compression
 - LowID callbacks (IPv4, and IPv6 via `OP_CALLBACKREQUESTED_IPV6` when the requester
   is only reachable over IPv6)
-- NAT traversal server (`OP_VC_NAT_HEADER`, `OP_NAT_REGISTER`, `OP_NAT_SYNC2`)
+- NAT traversal server (`OP_VC_NAT_HEADER`, `OP_NAT_REGISTER`, `OP_NAT_SYNC2`):
+  dual-stack UDP hole-punching for LowID↔LowID and firewalled IPv6↔IPv6 peers (a v4
+  and a v6 candidate per client, v6 preferred); gated by `natTraversal.ipv6` (default
+  on). The registry is login-independent, so `natTraversal.serverIndependent` (default
+  on) pairs clients across **different servers or no server** — cross-server /
+  serverless LowID↔LowID — advertised via `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` + an
+  `OP_SERVERIDENT` NAT-port tag. See
+  [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9.
 - Files larger than 4 GiB
 - IPv6 dual-stack: accepts IPv6 client logins, records and verifies each client's
-  IPv6, and publishes IPv6 sources (eMuleAI/eMuleQt `CT_MOD_*` compatible). See
+  IPv6, publishes IPv6 sources, and advertises IPv6 peer servers in `OP_SERVERLIST`
+  (eMuleAI/eMuleQt `CT_MOD_*` compatible). See
   [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md).
   Disable with `ipv6.enabled: false` for the exact IPv4-only behaviour.
 - Easy support for multiple storage engines
@@ -67,8 +75,10 @@ testUrls:                    # Used only when dynIp=auto, first valid IPv4 wins
 messageLowID: "You have LowID."   # Message sent to LowID clients
 messageLogin: "Welcome to eNode!" # Message sent on login
 
-servers: []                  # Peer servers advertised in OP_SERVERLIST; empty is the default
-  # - ip: "192.0.2.10"
+servers: []                  # Peer servers advertised in OP_SERVERLIST; empty is the default.
+  # - ip: "192.0.2.10"        # ip may be IPv4 or a public IPv6 (v6 goes in the trailing v6 block)
+  #   port: 4661
+  # - ip: "2001:db8::10"
   #   port: 4661
 
 noAssert: false              # Compatibility assert switch (normally false)
@@ -101,6 +111,8 @@ udp:
 natTraversal:
   enabled: true              # Enable NAT traversal service
   port: 2004                 # NAT traversal UDP port
+  ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
+  serverIndependent: true    # Cross-server / serverless LowID↔LowID rendezvous (default on)
   registrationTTLSeconds: 30 # NAT registry TTL (seconds)
 
 ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-only behaviour
@@ -181,10 +193,6 @@ ENODE_INTEGRATION=1 go test ./storage -run Dockertest -v
 ```
 
 This spins temporary MySQL and MongoDB containers, initializes schema/data, and verifies backend behavior end-to-end.
-
-## To Do
-
-- Better storage/indexing
 
 ## Thanks To
 

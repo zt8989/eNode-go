@@ -138,6 +138,14 @@ func run(ctx context.Context, configPath string) error {
 	}
 
 	dualStack := cfg.IPv6.EnabledOrDefault()
+	// Server-independent (cross-server / serverless) PR_NAT rendezvous is effective
+	// only when the NAT service itself is enabled. It drives both the FlagNatRendezvous
+	// advertisement and the OP_SERVERIDENT NAT-port tag.
+	natServerIndependent := cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault()
+	natRendezvousPort := uint16(0)
+	if natServerIndependent {
+		natRendezvousPort = cfg.NAT.Port
+	}
 	tcpCfg := ed2k.TCPServerConfig{
 		Address:        cfg.Address,
 		Port:           cfg.TCP.Port,
@@ -148,6 +156,7 @@ func run(ctx context.Context, configPath string) error {
 		SupportCrypt:   cfg.SupportCrypt,
 		IPInLogin:      cfg.IPInLogin,
 		DualStack:      dualStack,
+		NatRendezvous:  natServerIndependent,
 	}
 	udpCfg := ed2k.UDPServerConfig{
 		Address:      cfg.Address,
@@ -198,6 +207,7 @@ func run(ctx context.Context, configPath string) error {
 			PublishV6Sources:  dualStack && cfg.IPv6.PublishSourcesOrDefault(),
 			ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
 			ServerIPv6:        serverIPv6,
+			NatRendezvousPort: natRendezvousPort,
 		},
 		ed2k.UDPRuntimeConfig{
 			Name:        cfg.Name,
@@ -229,9 +239,24 @@ func run(ctx context.Context, configPath string) error {
 		natHandler := ed2k.NewNATTraversalHandler(natTTL)
 		natHandler.ConfigureRegisterEndpointFromConfig(cfg.DynIP, cfg.Address, cfg.UDP.Port)
 		natHandler.SetRegisterEndpointForLocalPort(cfg.NAT.Port, cfg.UDP.Port)
+		// Dual-stack hole-punching: enabled when v6 is up and natTraversal.ipv6 is on.
+		// serverIPv6 (resolved above) is the endpoint returned in the v6 REGISTER ack.
+		if dualStack && cfg.NAT.IPv6OrDefault() {
+			natHandler.SetIPv6Enabled(true)
+			if len(serverIPv6) == 16 {
+				natHandler.SetRegisterEndpointV6(serverIPv6)
+			}
+		}
 		if cfg.SupportCrypt && cfg.UDP.PortObfuscated != 0 {
 			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortObfuscated, cfg.UDP.PortObfuscated)
 		}
+		// Server-independent (cross-server / serverless) rendezvous. When off, the
+		// membership predicate restricts SYNC2 pairing to user hashes currently logged
+		// into this server (Storage.IsConnected, backed by a by-hash index).
+		natHandler.SetServerIndependent(cfg.NAT.ServerIndependentOrDefault())
+		natHandler.SetLocalMembership(func(h [16]byte) bool {
+			return runtime.Storage.IsConnected(storage.ClientInfo{Hash: h[:]})
+		})
 		runtime.SetNATHandler(natHandler)
 		effectiveIP := cfg.DynIP
 		if effectiveIP == "" {
@@ -377,14 +402,14 @@ func serverIdentitySeed(advertisedIP, configuredAddress string) string {
 
 // seedServers loads the configured peer servers into storage so OP_SERVERLIST can
 // advertise them. This is the only caller of Engine.AddServer outside tests — the
-// list was permanently empty before. An entry with an unparseable IP is skipped
-// with a warning rather than aborting: BuildServerListPacket errors on the first
-// bad IP and sendServerList then drops the whole packet, so one typo would silence
-// the entire list. Empty config (the default) seeds nothing, unchanged.
+// list was permanently empty before. Both an IPv4 and a public IPv6 address are
+// accepted (the wire builder advertises the latter in the trailing v6 block); an
+// entry classified as neither is skipped with a warning rather than aborting, so
+// one typo cannot silence the whole list. Empty config (the default) seeds nothing.
 func seedServers(store storage.Engine, entries []config.ServerEntry) {
 	for _, e := range entries {
-		if _, err := ed2k.IPv4ToInt32LE(e.IP); err != nil {
-			logging.Warnf("skipping server list entry %q:%d: invalid IPv4", e.IP, e.Port)
+		if _, _, fam := ed2k.ClassifyServerIP(e.IP); fam == 0 {
+			logging.Warnf("skipping server list entry %q:%d: not a valid IPv4 or public IPv6", e.IP, e.Port)
 			continue
 		}
 		store.AddServer(storage.Server{IP: e.IP, Port: e.Port})

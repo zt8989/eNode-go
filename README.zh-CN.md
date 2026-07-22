@@ -24,7 +24,8 @@
 - Lugdunum/eMule 扩展协议
 - gzip 压缩
 - LowID 回调（IPv4；当请求方仅能通过 IPv6 到达时，使用 `OP_CALLBACKREQUESTED_IPV6`）
-- NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）
+- NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）：双栈 UDP 打洞，支持 LowID↔LowID 与被防火墙隔离的 IPv6↔IPv6 对端（每个客户端保存一个 v4 和一个 v6 候选端点，优先 v6）；由 `natTraversal.ipv6` 控制（默认开启，需 `ipv6.enabled`）。注册表以用户 hash 为键、与登录无关，因此 `natTraversal.serverIndependent`（默认开启）可为**位于不同服务器或未连接任何服务器**的客户端配对——跨服务器 / 无服务器 LowID↔LowID——并通过 `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` 及 `OP_SERVERIDENT` 中的 NAT 端口标签对外通告。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9。
+- IPv6 双栈：接受 IPv6 登录、记录并校验各客户端的 IPv6、发布 IPv6 源，并在 `OP_SERVERLIST` 中通告 IPv6 对端服务器（兼容 eMuleAI/eMuleQt 的 `CT_MOD_*`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md)。设置 `ipv6.enabled: false` 可恢复纯 IPv4 行为。
 - 支持大于 4 GiB 的文件
 - 易于扩展多种存储引擎
 
@@ -61,7 +62,9 @@ messageLowID: "You have LowID."   # LowID 登录提示
 messageLogin: "Welcome to eNode!" # 普通登录提示
 
 servers: []                  # OP_SERVERLIST 中通告的其他服务器（不含本机）；默认为空
-  # - ip: "192.0.2.10"
+  # - ip: "192.0.2.10"        # ip 可为 IPv4 或公网 IPv6（IPv6 放在尾部 v6 区块中通告）
+  #   port: 4661
+  # - ip: "2001:db8::10"
   #   port: 4661
 
 noAssert: false              # 兼容历史行为的断言开关（默认关闭）
@@ -94,6 +97,8 @@ udp:
 natTraversal:
   enabled: true              # 是否启用 NAT 穿透服务
   port: 2004                 # NAT 穿透 UDP 端口
+  ipv6: true                 # IPv6 打洞（双栈候选端点）；需 ipv6.enabled
+  serverIndependent: true    # 跨服务器 / 无服务器 LowID↔LowID 汇合（默认开启）
   registrationTTLSeconds: 30 # NAT 注册表项有效期（秒）
 
 ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为
@@ -174,11 +179,6 @@ ENODE_INTEGRATION=1 go test ./storage -run Dockertest -v
 ```
 
 该测试会启动临时 MySQL 和 MongoDB 容器，初始化 schema/数据，并验证后端的端到端行为。
-
-## 待办
-
-- 更好的存储/索引方案
-- IPv6 支持（[eD2K IPv6 扩展非官方草案](http://piratenpad.de/p/ed2kIPv6)）
 
 ## 致谢
 

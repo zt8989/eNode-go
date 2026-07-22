@@ -1,6 +1,7 @@
 package natsim
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -79,6 +80,45 @@ func TestDecodeSyncPayloadVersions(t *testing.T) {
 			t.Fatalf("27-byte SYNC_EX: ok=%t hasVersion=%t peerVersion=%d, want true/true/7", ok, info.HasVersion, info.PeerVersion)
 		}
 	})
+}
+
+// TestDecodeSyncPayloadV6 decodes the 39-byte OP_NAT_SYNC_IPV6 payload:
+// [ipv6:16][port:2 BE][hash:16][connAck:4][version:1].
+func TestDecodeSyncPayloadV6(t *testing.T) {
+	ip := net.ParseIP("2001:db8::1234").To16()
+	hash := bytes.Repeat([]byte{0xab}, 16)
+	payload := append([]byte(nil), ip...)
+	payload = append(payload, 0x13, 0x88) // port 5000 BE
+	payload = append(payload, hash...)
+	payload = append(payload, 0xde, 0xad, 0xbe, 0xef) // connAck
+	payload = append(payload, 0x07)                   // version
+
+	t.Logf("input: %d-byte SYNC_IPV6 payload = %s", len(payload), HexDump(payload))
+	info, ok := DecodeSyncPayloadV6(payload)
+	t.Logf("output: ok=%t peerIP=%s port=%d hash=%x connAck=%x version=%d hasVersion=%t",
+		ok, info.PeerIP, info.PeerPort, info.PeerHash, info.ConnAck, info.PeerVersion, info.HasVersion)
+	if !ok {
+		t.Fatalf("decode failed")
+	}
+	if !info.PeerIP.Equal(net.ParseIP("2001:db8::1234")) {
+		t.Fatalf("peerIP=%s want 2001:db8::1234", info.PeerIP)
+	}
+	if info.PeerPort != 5000 {
+		t.Fatalf("port=%d want 5000", info.PeerPort)
+	}
+	if !bytes.Equal(info.PeerHash[:], hash) {
+		t.Fatalf("hash %x want %x", info.PeerHash, hash)
+	}
+	if info.PeerVersion != 7 || !info.HasVersion {
+		t.Fatalf("version=%d hasVersion=%t want 7/true", info.PeerVersion, info.HasVersion)
+	}
+	if !bytes.Equal(info.ConnAck[:], []byte{0xde, 0xad, 0xbe, 0xef}) {
+		t.Fatalf("connAck=%x", info.ConnAck)
+	}
+	// A short payload is rejected.
+	if _, ok := DecodeSyncPayloadV6(payload[:38]); ok {
+		t.Fatalf("38-byte payload should not decode as SYNC_IPV6")
+	}
 }
 
 // TestBuildRegisterPacket round-trips both register forms (feature 1 encode side).

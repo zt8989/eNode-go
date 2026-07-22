@@ -11,4 +11,4 @@
 
 ## ed2k Protocol
 
-- ensure your implementation is compatible with latest C++ client at `/Users/daniel/Documents/Coding/CPP/eMuleQt/src` and original client at `/Users/daniel/Documents/Coding/CPP/eMuleQt/srchybrid
+- ensure your implementation is compatible with latest C++ client at `/Users/daniel/Documents/Coding/CPP/eMuleQt/src` and original client at `/Users/daniel/Documents/Coding/CPP/eMuleQt/srchybrid`

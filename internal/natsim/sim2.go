@@ -25,6 +25,7 @@ type Sim2Options struct {
 	Hash         [16]byte
 	Peer         [16]byte
 	ListenPort   int
+	ListenIP     net.IP // bind IP; nil = IPv4 wildcard. Pass ::/::1 for a v6 run.
 	Timeout      time.Duration
 	RegisterMode string // "legacy" (OP_NAT_REGISTER) | "ex" (OP_NAT_REGISTER_EX)
 	Version      uint8  // client version advertised when RegisterMode == "ex"
@@ -48,7 +49,7 @@ func RunSim2(ctx context.Context, o Sim2Options) (Sim2Result, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: o.ListenPort})
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: listenIP(o.ListenIP), Port: o.ListenPort})
 	if err != nil {
 		return Sim2Result{}, fmt.Errorf("listen udp: %w", err)
 	}

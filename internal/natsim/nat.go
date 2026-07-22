@@ -74,6 +74,23 @@ func DecodeSyncPayload(payload []byte) (SyncInfo, bool) {
 	return info, true
 }
 
+// DecodeSyncPayloadV6 decodes an OP_NAT_SYNC_IPV6 payload (39 bytes):
+// [ipv6:16][port:2 BE][hash:16][connAck:4][version:1]. The peer version is always
+// present (0 when the peer registered without one), so HasVersion is always true.
+func DecodeSyncPayloadV6(payload []byte) (SyncInfo, bool) {
+	if len(payload) < 39 {
+		return SyncInfo{}, false
+	}
+	var info SyncInfo
+	info.PeerIP = append(net.IP(nil), payload[0:16]...)
+	info.PeerPort = binary.BigEndian.Uint16(payload[16:18])
+	copy(info.PeerHash[:], payload[18:34])
+	copy(info.ConnAck[:], payload[34:38])
+	info.PeerVersion = payload[38]
+	info.HasVersion = true
+	return info, true
+}
+
 // BuildRegisterPacket encodes an OP_NAT_REGISTER (hash only) or, when ex is
 // true, an OP_NAT_REGISTER_EX carrying the client version byte after the hash.
 // Registering with ex>version 0 is what makes the server answer this client

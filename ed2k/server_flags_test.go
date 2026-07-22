@@ -32,6 +32,20 @@ func TestBuildTCPFlagsSupportCryptDrivesObfuscation(t *testing.T) {
 	t.Logf("supportCrypt-only=0x%04x plain=0x%04x", flags, plain)
 }
 
+func TestBuildTCPFlagsNatRendezvous(t *testing.T) {
+	// FlagNatRendezvous (0x8000) advertises server-independent PR_NAT rendezvous and
+	// is orthogonal to the other bits.
+	on := BuildTCPFlags(TCPServerConfig{NatRendezvous: true})
+	if on&FlagNatRendezvous == 0 {
+		t.Fatalf("NatRendezvous bit must be set: 0x%04x", on)
+	}
+	off := BuildTCPFlags(TCPServerConfig{NatRendezvous: false})
+	if off&FlagNatRendezvous != 0 {
+		t.Fatalf("NatRendezvous bit must be clear when off: 0x%04x", off)
+	}
+	t.Logf("input: NatRendezvous on/off; output flags on=0x%04x off=0x%04x", on, off)
+}
+
 func TestBuildUDPFlags(t *testing.T) {
 	flags := BuildUDPFlags(UDPServerConfig{
 		GetSources: true, GetFiles: true, SupportCrypt: true, DualStack: true,

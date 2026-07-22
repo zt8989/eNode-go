@@ -44,7 +44,9 @@ type Config struct {
 	Storage StorageConfig `yaml:"storage"`
 }
 
-// ServerEntry is one advertised peer server in OP_SERVERLIST.
+// ServerEntry is one advertised peer server in OP_SERVERLIST. IP may be an IPv4
+// dotted-quad or a public IPv6 literal; a v6 entry is advertised in the trailing
+// IPv6 block (see ed2k.BuildServerListPacket) to v6-aware clients only.
 type ServerEntry struct {
 	IP   string `yaml:"ip"`
 	Port uint16 `yaml:"port"`
@@ -73,10 +75,28 @@ type UDPConfig struct {
 }
 
 type NATConfig struct {
-	Enabled                bool   `yaml:"enabled"`
-	Port                   uint16 `yaml:"port"`
-	RegistrationTTLSeconds int    `yaml:"registrationTTLSeconds"`
+	Enabled bool   `yaml:"enabled"`
+	Port    uint16 `yaml:"port"`
+	// IPv6 enables dual-stack hole-punching (OP_NAT_*_IPV6). *bool so an absent key
+	// defaults on; effective only when NAT and top-level ipv6 are also enabled. See
+	// docs/ipv6-client-implementation-spec.md §9.
+	IPv6 *bool `yaml:"ipv6"`
+	// ServerIndependent enables cross-server / serverless LowID↔LowID rendezvous: the
+	// server pairs two registered clients regardless of which eD2K server (if any)
+	// they are logged into, and advertises the capability. *bool so an absent key
+	// defaults on. When off, pairing is restricted to clients currently logged into
+	// this server. See docs/ipv6-client-implementation-spec.md §9.
+	ServerIndependent      *bool `yaml:"serverIndependent"`
+	RegistrationTTLSeconds int   `yaml:"registrationTTLSeconds"`
 }
+
+// IPv6OrDefault reports whether IPv6 hole-punching is enabled, defaulting to true
+// (subject to the top-level ipv6.enabled and natTraversal.enabled gates).
+func (c NATConfig) IPv6OrDefault() bool { return boolOrDefault(c.IPv6, true) }
+
+// ServerIndependentOrDefault reports whether server-independent (cross-server /
+// serverless) rendezvous is enabled, defaulting to true.
+func (c NATConfig) ServerIndependentOrDefault() bool { return boolOrDefault(c.ServerIndependent, true) }
 
 // IPv6Config controls dual-stack listening and IPv6 source publication. When
 // disabled the server behaves exactly as before: IPv4-only listeners, no IPv6

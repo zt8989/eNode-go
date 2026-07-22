@@ -44,6 +44,59 @@ func TestServerIdentAdvertisesIPv6(t *testing.T) {
 	t.Log("v4-only server omits the svripv6 tag")
 }
 
+// TestServerIdentAdvertisesNatPort checks the TagNatPort (0x9d) uint16 tag is
+// appended to OP_SERVERIDENT when NatPort is set, and omitted when zero.
+func TestServerIdentAdvertisesNatPort(t *testing.T) {
+	conf := ServerConfig{
+		Name:        "eNode",
+		Description: "test",
+		Address:     "192.0.2.1",
+		Hash:        bytes.Repeat([]byte{0x01}, 16),
+		TCPPort:     5555,
+		NatPort:     2004,
+	}
+	buf, err := BuildServerIdentPacket(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := parseServerIdentTags(t, buf)["natport"]
+	if !ok {
+		t.Fatal("TagNatPort tag missing")
+	}
+	if !equalUint16(got, 2004) {
+		t.Fatalf("nat port tag = %v (%T), want 2004", got, got)
+	}
+	t.Logf("input: NatPort=2004; output: OP_SERVERIDENT carries natport=%v", got)
+
+	// NatPort 0 (feature off / NAT disabled) omits the tag — no regression.
+	conf.NatPort = 0
+	buf2, err := BuildServerIdentPacket(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parseServerIdentTags(t, buf2)["natport"]; ok {
+		t.Fatal("natport tag present when NatPort is 0")
+	}
+	t.Log("input: NatPort=0; output: OP_SERVERIDENT omits the natport tag")
+}
+
+// equalUint16 compares a decoded tag value against want. GetTags normalises integer
+// tags to uint64, but accept the other unsigned widths too for robustness.
+func equalUint16(got any, want uint16) bool {
+	switch v := got.(type) {
+	case uint64:
+		return v == uint64(want)
+	case uint32:
+		return v == uint32(want)
+	case uint16:
+		return v == want
+	case int:
+		return v == int(want)
+	default:
+		return false
+	}
+}
+
 // parseServerIdentTags decodes an OP_SERVERIDENT packet's tag list to a
 // name->value map.
 func parseServerIdentTags(t *testing.T, buf *Buffer) map[string]any {

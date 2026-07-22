@@ -44,6 +44,42 @@ func startNATServer(t *testing.T) *net.UDPAddr {
 	return addr
 }
 
+// startNATServerV6 is the IPv6 twin of startNATServer: it binds ::1, enables
+// dual-stack hole-punching, and announces [::1]:port in the v6 REGISTER ack. Skips
+// the test when IPv6 loopback is unavailable.
+func startNATServerV6(t *testing.T) *net.UDPAddr {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	addr := conn.LocalAddr().(*net.UDPAddr)
+	handler := ed2k.NewNATTraversalHandler(time.Minute)
+	handler.SetIPv6Enabled(true)
+	handler.SetRegisterEndpoint("::1", uint16(addr.Port)) // sets the announce port
+	handler.SetRegisterEndpointV6(net.IPv6loopback)
+	t.Logf("nat server (v6) listening on %s (announce [::1]:%d)", addr.String(), addr.Port)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 2048)
+		for {
+			n, remote, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return // socket closed on cleanup
+			}
+			pkt := append([]byte(nil), buf[:n]...)
+			handler.HandlePacket(pkt, remote, conn, nil)
+		}
+	}()
+	t.Cleanup(func() {
+		conn.Close()
+		<-done
+	})
+	return addr
+}
+
 type testLogger struct{ t *testing.T }
 
 func (l testLogger) Printf(format string, v ...any) { l.t.Logf(format, v...) }
@@ -202,6 +238,83 @@ func TestSimRegisterExTriggersSyncEx(t *testing.T) {
 		t.Fatalf("legacy initiator should receive plain SYNC, got sync=%+v", res2.Sync)
 	}
 	t.Logf("target got OP_NAT_SYNC_EX (peerVersion=%d), initiator got plain OP_NAT_SYNC", got.res.Sync.PeerVersion)
+}
+
+// TestSimEndToEndHolePunchIPv6 is the IPv6 twin of TestSimEndToEndHolePunch: both
+// peers register over IPv6 (::1), the initiator pairs via OP_NAT_SYNC2, both receive
+// the peer's v6 endpoint via OP_NAT_SYNC_IPV6, and complete a PING/PONG punch. This
+// is the "two firewalled IPv6 peers" case the 0x26 callback cannot reach.
+func TestSimEndToEndHolePunchIPv6(t *testing.T) {
+	serverAddr := startNATServerV6(t)
+	lg := testLogger{t}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	hashTarget := mkHash(0x71)
+	hashInitiator := mkHash(0x82)
+	t.Logf("input: IPv6 hole-punch; target hash=%x initiator hash=%x nat=%s", hashTarget, hashInitiator, serverAddr)
+
+	ready := make(chan struct{}, 1)
+	sim1Done := make(chan sim1Outcome, 1)
+	go func() {
+		res, err := RunSim1(ctx, Sim1Options{
+			NATAddr:       serverAddr,
+			Hash:          hashTarget,
+			ListenIP:      net.IPv6loopback,
+			Timeout:       5 * time.Second,
+			PingAfterSync: true,
+			ExitAfterPong: true,
+			Ready:         ready,
+			Logger:        lg,
+		})
+		sim1Done <- sim1Outcome{res, err}
+	}()
+	waitReady(t, ready)
+
+	res2, err2 := RunSim2(ctx, Sim2Options{
+		NATAddr:  serverAddr,
+		Hash:     hashInitiator,
+		Peer:     hashTarget,
+		ListenIP: net.IPv6loopback,
+		Timeout:  5 * time.Second,
+		Logger:   lg,
+	})
+	if err2 != nil {
+		t.Fatalf("initiator (sim2) failed: %v", err2)
+	}
+
+	var got sim1Outcome
+	select {
+	case got = <-sim1Done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("target (sim1) did not finish")
+	}
+	if got.err != nil {
+		t.Fatalf("target (sim1) failed: %v", got.err)
+	}
+
+	t.Logf("output: sim1 registered=%t pingsAnswered=%d sync=%+v", got.res.Registered, got.res.PingsAnswered, got.res.Sync)
+	t.Logf("output: sim2 registered=%t gotPong=%t sync=%+v", res2.Registered, res2.GotPong, res2.Sync)
+
+	if !res2.Registered || !res2.GotPong || res2.Sync == nil {
+		t.Fatalf("initiator: registered=%t gotPong=%t sync=%v", res2.Registered, res2.GotPong, res2.Sync)
+	}
+	if !got.res.Registered || got.res.Sync == nil || got.res.PingsAnswered < 1 {
+		t.Fatalf("target: registered=%t sync=%v pingsAnswered=%d", got.res.Registered, got.res.Sync, got.res.PingsAnswered)
+	}
+	// The learned peer endpoints must be genuine IPv6 — proof the v6 SYNC path ran.
+	if ip := res2.Sync.PeerIP; ip.To4() != nil || ip.To16() == nil {
+		t.Fatalf("initiator learned non-v6 peer IP %v; v6 sync path not taken", ip)
+	}
+	if got.res.Sync.PeerHash != hashInitiator {
+		t.Fatalf("target learned peer hash %x, want initiator %x", got.res.Sync.PeerHash, hashInitiator)
+	}
+	if res2.Sync.PeerHash != hashTarget {
+		t.Fatalf("initiator learned peer hash %x, want target %x", res2.Sync.PeerHash, hashTarget)
+	}
+	if got.res.Sync.ConnAck != res2.Sync.ConnAck {
+		t.Fatalf("connAck mismatch: target=%x initiator=%x", got.res.Sync.ConnAck, res2.Sync.ConnAck)
+	}
 }
 
 // TestSimKeepalivePingAck proves feature 2 end-to-end: the server answers each

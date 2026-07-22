@@ -485,6 +485,8 @@ func tagName(code uint8) string {
 		return "ipv6"
 	case TagModSvrIPv6:
 		return "svripv6"
+	case TagNatPort:
+		return "natport"
 	default:
 		return fmt.Sprintf("0x%x", code)
 	}
